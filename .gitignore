@@ -1,23 +1,30 @@
-# Dependencies
-node_modules/
+# Python
 __pycache__/
-*.pyc
-.pyo
-.pyd
-.Python
+*.py[cod]
+*$py.class
 *.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
 .eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
 *.egg-info/
+.installed.cfg
 *.egg
-pip-log.txt
-pip-delete-this-directory.txt
 
-# Environment
-.env
-.env.local
-.venv/
+# Virtual environments
 venv/
 ENV/
+env/
+.venv/
 
 # IDE
 .idea/
@@ -26,33 +33,34 @@ ENV/
 *.swo
 *~
 
-# Build
-dist/
-build/
-release/
-*.spec
-
-# Logs
-logs/
-*.log
-npm-debug.log*
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Test
+# Testing
 .pytest_cache/
 .coverage
 htmlcov/
 .tox/
 .nox/
 
-# Cache
-.cache/
-.parcel-cache/
-.electron/
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# Data (user data should not be committed)
-AI-writer-data/
+# Electron
+release/
+out/
+
+# Project specific
+backend/memory/
+backend/.coverage
 *.sqlite3
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
