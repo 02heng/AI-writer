@@ -345,13 +345,21 @@ async function selectReaderBook(bookId, titleLabel) {
   chBox.innerHTML = '加载目录…';
   if (chMore) chMore.hidden = true;
   try {
-    const nsData = await fetchJson(`/api/books/${encodeURIComponent(bookId)}/chapter-ns`);
-    readerChapterNs = (nsData.ns || []).slice().sort((a, b) => a - b);
+    readerChapterNs = [];
+    try {
+      const nsData = await fetchJson(`/api/books/${encodeURIComponent(bookId)}/chapter-ns`);
+      readerChapterNs = (nsData.ns || []).slice().sort((a, b) => a - b);
+    } catch {
+      /* 旧版后端无 /chapter-ns，下面从 toc 推导章节序号 */
+    }
     const t0 = await fetchJson(
       `/api/books/${encodeURIComponent(bookId)}/toc?limit=${CHAPTER_TOC_PAGE}&offset=0`
     );
     readerToc = t0.toc || [];
     readerTocTotal = typeof t0.total === 'number' ? t0.total : readerToc.length;
+    if (!readerChapterNs.length && readerToc.length) {
+      readerChapterNs = [...new Set(readerToc.map((r) => r.n))].sort((a, b) => a - b);
+    }
     renderChapterList(bookId);
     if (chMore) chMore.hidden = readerToc.length >= readerTocTotal;
     if (!readerChapterNs.length) {
@@ -386,8 +394,14 @@ async function refreshReaderBooks(reset = true) {
     const data = await fetchJson(
       `/api/books?limit=${BOOKS_PAGE}&offset=${offset}&q=${encodeURIComponent(q)}`
     );
-    booksListMeta.total = data.total ?? 0;
     const chunk = data.books || [];
+    if (data.total != null && Number.isFinite(Number(data.total))) {
+      booksListMeta.total = Number(data.total);
+    } else if (reset) {
+      booksListMeta.total = chunk.length;
+    } else {
+      booksListMeta.total = Math.max(booksListMeta.total, booksLoaded.length + chunk.length);
+    }
     if (reset) booksLoaded = chunk.slice();
     else booksLoaded = booksLoaded.concat(chunk);
     if (!booksLoaded.length) {
@@ -538,8 +552,14 @@ async function refreshTrashList(reset = true) {
     const data = await fetchJson(
       `/api/trash/books?limit=${TRASH_PAGE}&offset=${offset}&q=${encodeURIComponent(q)}`
     );
-    trashListMeta.total = data.total ?? 0;
     const chunk = data.items || [];
+    if (data.total != null && Number.isFinite(Number(data.total))) {
+      trashListMeta.total = Number(data.total);
+    } else if (reset) {
+      trashListMeta.total = chunk.length;
+    } else {
+      trashListMeta.total = Math.max(trashListMeta.total, trashLoaded.length + chunk.length);
+    }
     if (reset) trashLoaded = chunk.slice();
     else trashLoaded = trashLoaded.concat(chunk);
     if (!trashLoaded.length) {
