@@ -25,6 +25,8 @@ class TestHealthEndpoint:
             assert "ok" in data
             assert "user_data" in data
             assert "deepseek_configured" in data
+            assert data.get("api_revision") >= 2
+            assert data.get("pipeline_stream") is True
 
 
 class TestThemesEndpoint:
@@ -92,6 +94,7 @@ class TestBooksEndpoints:
             assert response.status_code == 200
             data = response.json()
             assert data["books"] == []
+            assert data.get("total") == 0
 
     def test_book_not_found(self, temp_data_dir: Path) -> None:
         """Test accessing non-existent book."""

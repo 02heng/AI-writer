@@ -19,10 +19,11 @@ from .book_storage import (
     book_dir,
     books_root,
     export_book_plain_text,
+    get_chapter_numbers,
     get_meta,
     get_toc,
-    list_books,
-    list_trashed_books,
+    list_books_slice,
+    list_trashed_books_slice,
     move_book_to_trash,
     purge_book_from_trash,
     read_chapter,
@@ -210,11 +211,17 @@ def _compose_system(base_system: str, theme_id: Optional[str]) -> str:
     return f"{base_system.strip()}\n\n【题材约束】\n{addon}"
 
 
+# 递增：Electron 启动时用于识别「本机 18765 上是否为当前应用的后端」，避免旧版/他进程占位导致 404。
+API_REVISION = 2
+
+
 @app.get("/api/health")
 def health():
     has_key = bool(os.environ.get("DEEPSEEK_API_KEY", "").strip())
     return {
         "ok": True,
+        "api_revision": API_REVISION,
+        "pipeline_stream": True,
         "user_data": str(ROOT),
         "books_root": str(books_root(ROOT)),
         "books_root_env": bool(os.environ.get("AIWRITER_BOOKS_ROOT", "").strip()),
@@ -264,8 +271,8 @@ def library_series():
 
 
 @app.get("/api/books")
-def api_books_list():
-    return {"books": list_books(ROOT)}
+def api_books_list(limit: int = 200, offset: int = 0, q: str = ""):
+    return list_books_slice(ROOT, limit=limit, offset=offset, q=q)
 
 
 @app.get("/api/books/{book_id}")
@@ -275,9 +282,21 @@ def api_book_detail(book_id: str):
     return {"meta": meta, "toc": toc}
 
 
+@app.get("/api/books/{book_id}/chapter-ns")
+def api_book_chapter_ns(book_id: str):
+    book_dir(ROOT, book_id)
+    return {"ns": get_chapter_numbers(ROOT, book_id)}
+
+
 @app.get("/api/books/{book_id}/toc")
-def api_book_toc(book_id: str):
-    return {"toc": get_toc(ROOT, book_id)}
+def api_book_toc(book_id: str, limit: int = 0, offset: int = 0):
+    full = get_toc(ROOT, book_id)
+    total = len(full)
+    if limit and limit > 0:
+        off = max(0, int(offset))
+        lim = min(max(int(limit), 1), 2500)
+        return {"toc": full[off : off + lim], "total": total, "limit": lim, "offset": off}
+    return {"toc": full, "total": total}
 
 
 @app.get("/api/books/{book_id}/chapters/{chapter_n}")
@@ -304,8 +323,8 @@ def api_book_move_to_trash(book_id: str):
 
 
 @app.get("/api/trash/books")
-def api_trash_books_list():
-    return {"items": list_trashed_books(ROOT)}
+def api_trash_books_list(limit: int = 200, offset: int = 0, q: str = ""):
+    return list_trashed_books_slice(ROOT, limit=limit, offset=offset, q=q)
 
 
 @app.post("/api/trash/books/restore")

@@ -312,11 +312,31 @@
           <aside class="reader-books surface">
             <h2 class="reader-side-title">书本</h2>
             <p class="reader-side-lead">每本书独立目录与记忆宫殿；一键生成会出现在此。</p>
+            <label class="lbl sr-only" for="book-list-search">搜索书本</label>
+            <input
+              type="search"
+              id="book-list-search"
+              class="inp library-filter"
+              placeholder="搜索书名或 ID…"
+              autocomplete="off"
+            />
             <button type="button" class="btn btn-primary btn-block" id="btn-library-refresh">刷新</button>
+            <p id="book-list-meta" class="library-meta rail-hint"></p>
             <div id="book-list" class="library-scroll" role="list"></div>
+            <button type="button" class="btn btn-secondary btn-block" id="book-list-more" hidden>加载更多书本</button>
             <h3 class="reader-side-title" style="margin-top: 1rem; font-size: 0.85rem">回收站</h3>
             <p class="reader-side-lead">删除的书本可在此还原；在回收站内再删将永久删除。</p>
+            <label class="lbl sr-only" for="trash-list-search">搜索回收站</label>
+            <input
+              type="search"
+              id="trash-list-search"
+              class="inp library-filter"
+              placeholder="搜索回收站…"
+              autocomplete="off"
+            />
+            <p id="trash-list-meta" class="library-meta rail-hint"></p>
             <div id="trash-list" class="library-scroll trash-scroll" role="list"></div>
+            <button type="button" class="btn btn-secondary btn-block" id="trash-list-more" hidden>加载更多</button>
             <p class="rail-hint" style="margin-top: 0.75rem">旧版 flat 章节</p>
             <button type="button" class="btn btn-ghost btn-block" id="btn-legacy-files-toggle">展开 out/*.md</button>
             <div id="legacy-file-list" class="library-scroll is-hidden" hidden></div>
@@ -324,7 +344,18 @@
           <aside class="reader-toc surface">
             <h2 class="reader-side-title">目录</h2>
             <p class="reader-side-lead" id="reader-book-hint">先选一本书</p>
+            <label class="lbl sr-only" for="chapter-list-filter">筛选章节</label>
+            <input
+              type="search"
+              id="chapter-list-filter"
+              class="inp library-filter"
+              placeholder="筛选已加载的章节…"
+              autocomplete="off"
+              disabled
+            />
+            <p id="chapter-list-meta" class="library-meta rail-hint"></p>
             <div id="chapter-list" class="library-scroll" role="list"></div>
+            <button type="button" class="btn btn-secondary btn-block" id="chapter-list-more" hidden>加载更多章节</button>
           </aside>
           <section class="reader-pane surface">
             <header class="reader-pane-head">
@@ -342,6 +373,32 @@
               <button type="button" class="btn btn-secondary" id="reader-next-ch">下一章</button>
             </div>
           </section>
+        </div>
+      </div>
+    </div>
+
+    <div id="app-dialog" class="app-dialog" hidden aria-hidden="true">
+      <div class="app-dialog__backdrop" id="app-dialog-backdrop"></div>
+      <div class="app-dialog__panel" role="dialog" aria-modal="true" aria-labelledby="app-dialog-title">
+        <h3 id="app-dialog-title" class="app-dialog__title">提示</h3>
+        <p id="app-dialog-body" class="app-dialog__body"></p>
+        <div class="app-dialog__actions">
+          <button type="button" class="btn btn-secondary" id="app-dialog-cancel" hidden>取消</button>
+          <button type="button" class="btn btn-primary" id="app-dialog-ok">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="app-prompt" class="app-dialog" hidden aria-hidden="true">
+      <div class="app-dialog__backdrop" id="app-prompt-backdrop"></div>
+      <div class="app-dialog__panel" role="dialog" aria-modal="true" aria-labelledby="app-prompt-title">
+        <h3 id="app-prompt-title" class="app-dialog__title">输入</h3>
+        <p id="app-prompt-hint" class="app-dialog__body app-dialog__body--tight"></p>
+        <label class="lbl" for="app-prompt-input" id="app-prompt-label">内容</label>
+        <input type="text" id="app-prompt-input" class="inp app-dialog__input" autocomplete="off" />
+        <div class="app-dialog__actions" style="margin-top: 1rem">
+          <button type="button" class="btn btn-secondary" id="app-prompt-cancel">取消</button>
+          <button type="button" class="btn btn-primary" id="app-prompt-ok">确定</button>
         </div>
       </div>
     </div>

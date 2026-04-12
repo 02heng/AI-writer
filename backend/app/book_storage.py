@@ -116,30 +116,82 @@ def create_book(
 
 
 def list_books(data_root: Path) -> list[dict[str, Any]]:
+    """书库列表（不逐本扫描章节文件，避免上千本书时卡死；章数以 index 为准，必要时回退为 glob 计数）。"""
     idx = _load_index(data_root)
     books = list(idx.get("books") or [])
     books.sort(key=lambda b: float(b.get("updated_at") or b.get("created_at") or 0), reverse=True)
     out = []
+    br = books_root(data_root)
     for b in books:
         bid = b.get("id")
         if not bid:
             continue
-        root = books_root(data_root) / str(bid)
+        root = br / str(bid)
         if not root.is_dir():
             continue
+        cc_raw = b.get("chapter_count")
         try:
-            toc = get_toc(data_root, str(bid))
-        except HTTPException:
-            continue
+            cc = int(cc_raw) if cc_raw is not None else -1
+        except (TypeError, ValueError):
+            cc = -1
+        if cc < 0:
+            chd = root / "chapters"
+            cc = len(list(chd.glob("*.md"))) if chd.is_dir() else 0
         out.append(
             {
                 "id": bid,
                 "title": b.get("title") or bid,
-                "chapter_count": len(toc),
+                "chapter_count": cc,
                 "updated_at": b.get("updated_at"),
             }
         )
     return out
+
+
+def list_books_slice(
+    data_root: Path,
+    *,
+    limit: int = 200,
+    offset: int = 0,
+    q: str = "",
+) -> dict[str, Any]:
+    rows = list_books(data_root)
+    qq = (q or "").strip().lower()
+    if qq:
+        rows = [
+            b
+            for b in rows
+            if qq in str(b.get("title") or "").lower() or qq in str(b.get("id") or "").lower()
+        ]
+    total = len(rows)
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    page = rows[offset : offset + limit]
+    return {"books": page, "total": total, "limit": limit, "offset": offset, "q": qq}
+
+
+def list_trashed_books_slice(
+    data_root: Path,
+    *,
+    limit: int = 200,
+    offset: int = 0,
+    q: str = "",
+) -> dict[str, Any]:
+    rows = list_trashed_books(data_root)
+    qq = (q or "").strip().lower()
+    if qq:
+        rows = [
+            it
+            for it in rows
+            if qq in str(it.get("title") or "").lower()
+            or qq in str(it.get("id") or "").lower()
+            or qq in str(it.get("folder") or "").lower()
+        ]
+    total = len(rows)
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    page = rows[offset : offset + limit]
+    return {"items": page, "total": total, "limit": limit, "offset": offset, "q": qq}
 
 
 def book_dir(data_root: Path, book_id: str) -> Path:
@@ -189,6 +241,21 @@ def _title_from_chapter_file(chapter_path: Path) -> str:
     except OSError:
         pass
     return ""
+
+
+def get_chapter_numbers(data_root: Path, book_id: str) -> list[int]:
+    """仅扫描章节文件名得到序号，用于上千章时的上一章/下一章导航，避免加载整本目录元数据。"""
+    root = book_dir(data_root, book_id)
+    ch_dir = root / "chapters"
+    if not ch_dir.is_dir():
+        return []
+    ns: list[int] = []
+    for p in ch_dir.glob("*.md"):
+        m = re.match(r"^(\d+)\.md$", p.name)
+        if m:
+            ns.append(int(m.group(1)))
+    ns.sort()
+    return ns
 
 
 def get_toc(data_root: Path, book_id: str) -> list[dict[str, Any]]:

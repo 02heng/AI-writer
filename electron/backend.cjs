@@ -7,6 +7,7 @@ const path = require('path');
 
 const BACKEND_PORT = 18765;
 const HEALTH_PATH = '/api/health';
+const MIN_API_REVISION = 2;
 const HEALTH_RETRIES = 40;
 const HEALTH_DELAY_MS = 250;
 
@@ -46,12 +47,32 @@ function waitForBackendReady() {
           timeout: 2000
         },
         (res) => {
-          res.resume();
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-            resolve();
-            return;
-          }
-          retry();
+          const chunks = [];
+          res.on('data', (c) => chunks.push(c));
+          res.on('end', () => {
+            const text = Buffer.concat(chunks).toString('utf8');
+            let data = {};
+            try {
+              data = JSON.parse(text);
+            } catch {
+              data = {};
+            }
+            if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+              const rev = Number(data.api_revision);
+              if (rev >= MIN_API_REVISION && data.pipeline_stream === true) {
+                resolve();
+                return;
+              }
+              reject(
+                new Error(
+                  `端口 ${BACKEND_PORT} 上已有其它程序在响应 /api/health（api_revision=${data.api_revision}），` +
+                    '不是当前版本的后端。请关闭占用该端口的旧版终端或其它服务后重试。'
+                )
+              );
+              return;
+            }
+            retry();
+          });
         }
       );
       req.on('error', retry);

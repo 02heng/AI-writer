@@ -31,6 +31,38 @@ logger = get_logger(__name__)
 ProgressCb = Optional[Callable[[dict[str, Any]], None]]
 
 
+def _heading_titles_equal(line_title: str, want: str) -> bool:
+    """Loose match for model ## line vs planned chapter title (handles spacing / 第 N 章)."""
+    a = re.sub(r"\s+", "", (line_title or "").strip())
+    b = re.sub(r"\s+", "", (want or "").strip())
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if a in b or b in a:
+        return len(min(a, b, key=len)) >= 4
+    return False
+
+
+def strip_leading_duplicate_chapter_heading(body: str, ch_title: str) -> str:
+    """Remove leading ##… lines that repeat the planned title (model often echoes contract)."""
+    t = body.strip()
+    want = (ch_title or "").strip()
+    if not t or not want:
+        return body
+    atx = re.compile(r"^#{1,6}\s*([^\n]+?)\s*(?:\n+|$)")
+    while True:
+        m = atx.match(t)
+        if not m:
+            break
+        line_title = m.group(1).strip()
+        if _heading_titles_equal(line_title, want):
+            t = t[m.end() :].lstrip()
+            continue
+        break
+    return t
+
+
 def sanitize_chapter_body(body: str) -> str:
     """Strip HTML comments, decorative asterisk lines, and trim."""
     t = body.strip()
@@ -134,7 +166,9 @@ def _format_chapter_contract(idx: int, ch: dict[str, Any], *, continuation: bool
     tail = "（续写：须自然承接上一章语气和事实，勿重述已交代信息）" if continuation else ""
     ch_title = _fallback_chapter_title(ch, idx)
     lines: list[str] = [f"【本章写作合同】第 {idx} 章{tail}"]
-    lines.append(f"【本章标题】{ch_title}（正文开头须用二级标题呈现：## {ch_title}）")
+    lines.append(
+        f"【本章标题】{ch_title}（标题由系统写入章节文件首行，**禁止**你在正文开头再输出 `##` 章节标题；请直接从叙事或对白起笔。）"
+    )
     lines.append(f"【节拍/要点】\n{ch.get('beat', '')}")
     pov = str(ch.get("pov", "")).strip()
     if pov:
@@ -444,6 +478,7 @@ def run_pipeline_from_title(
             raise HTTPException(502, f"第 {idx} 章生成失败: {e}") from e
 
         cleaned = sanitize_chapter_body(body)
+        cleaned = strip_leading_duplicate_chapter_heading(cleaned, ch_title)
         content = _chapter_heading(ch_title, idx) + cleaned + "\n"
         write_chapter(root, book_id, idx, content)
         saved.append(str(book_path / "chapters" / f"{idx:02d}.md"))
@@ -623,6 +658,7 @@ def run_continue_next_chapter(
         raise HTTPException(502, f"第 {next_n} 章续写失败: {e}") from e
 
     cleaned = sanitize_chapter_body(body)
+    cleaned = strip_leading_duplicate_chapter_heading(cleaned, title_next)
     content = _chapter_heading(title_next, next_n) + cleaned + "\n"
     write_chapter(root, book_id, next_n, content)
 
@@ -822,6 +858,7 @@ def run_continue_next_chapter_legacy_out(
     fpath = out_dir / Path(fname).name
     title_line = f"第 {next_n} 章"
     cleaned = sanitize_chapter_body(body)
+    cleaned = strip_leading_duplicate_chapter_heading(cleaned, title_line)
     out_text = f"## {title_line}\n\n{cleaned}\n"
     try:
         fpath.write_text(out_text, encoding="utf-8")

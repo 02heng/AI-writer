@@ -5,9 +5,116 @@ async function apiBase() {
   return window.aiWriter.getBackendUrl();
 }
 
+/** 拼接后端根地址与 /api/... 路径，避免 base 误带 /api 或重复斜杠。 */
+function joinBackendUrl(base, path) {
+  const b = String(base ?? '')
+    .trim()
+    .replace(/\/+$/, '');
+  const p = path.startsWith('/') ? path : `/${path}`;
+  const root = b.replace(/\/api\/?$/i, '');
+  return root + p;
+}
+
+function showAppDialog({ title, body, confirmMode = false, dangerConfirm = false }) {
+  return new Promise((resolve) => {
+    const shell = document.getElementById('app-dialog');
+    const titleEl = document.getElementById('app-dialog-title');
+    const bodyEl = document.getElementById('app-dialog-body');
+    const okBtn = document.getElementById('app-dialog-ok');
+    const cancelBtn = document.getElementById('app-dialog-cancel');
+    const backdrop = document.getElementById('app-dialog-backdrop');
+    if (!shell || !titleEl || !bodyEl || !okBtn || !cancelBtn) {
+      if (confirmMode) resolve(window.confirm(String(body)));
+      else {
+        window.alert(String(body));
+        resolve(undefined);
+      }
+      return;
+    }
+    const finish = (v) => {
+      okBtn.onclick = null;
+      cancelBtn.onclick = null;
+      if (backdrop) backdrop.onclick = null;
+      shell.hidden = true;
+      shell.setAttribute('aria-hidden', 'true');
+      resolve(v);
+    };
+    titleEl.textContent = title || (confirmMode ? '确认' : '提示');
+    bodyEl.textContent = body;
+    cancelBtn.hidden = !confirmMode;
+    okBtn.textContent = confirmMode ? '确定' : '知道了';
+    okBtn.className =
+      confirmMode && dangerConfirm ? 'btn btn-primary reader-danger' : 'btn btn-primary';
+    shell.hidden = false;
+    shell.setAttribute('aria-hidden', 'false');
+    okBtn.onclick = () => finish(confirmMode ? true : undefined);
+    cancelBtn.onclick = () => finish(false);
+    if (backdrop) {
+      backdrop.onclick = () => finish(confirmMode ? false : undefined);
+    }
+    okBtn.focus();
+  });
+}
+
+function showAppAlert(message, title) {
+  return showAppDialog({ title: title || '提示', body: message, confirmMode: false });
+}
+
+function showAppConfirm(message, title, dangerConfirm = false) {
+  return showAppDialog({
+    title: title || '确认',
+    body: message,
+    confirmMode: true,
+    dangerConfirm
+  });
+}
+
+/** 替代 window.prompt，返回输入文本或 null（取消）。 */
+function showAppPrompt(message, defaultValue = '', title = '输入', fieldLabel = '') {
+  return new Promise((resolve) => {
+    const shell = document.getElementById('app-prompt');
+    const titleEl = document.getElementById('app-prompt-title');
+    const hintEl = document.getElementById('app-prompt-hint');
+    const labelEl = document.getElementById('app-prompt-label');
+    const input = document.getElementById('app-prompt-input');
+    const okBtn = document.getElementById('app-prompt-ok');
+    const cancelBtn = document.getElementById('app-prompt-cancel');
+    const backdrop = document.getElementById('app-prompt-backdrop');
+    if (!shell || !input || !okBtn || !cancelBtn) {
+      resolve(window.prompt(message, defaultValue));
+      return;
+    }
+    const finish = (v) => {
+      okBtn.onclick = null;
+      cancelBtn.onclick = null;
+      input.onkeydown = null;
+      if (backdrop) backdrop.onclick = null;
+      shell.hidden = true;
+      shell.setAttribute('aria-hidden', 'true');
+      resolve(v);
+    };
+    titleEl.textContent = title;
+    hintEl.textContent = message || '';
+    labelEl.textContent = fieldLabel || '输入';
+    input.value = defaultValue ?? '';
+    shell.hidden = false;
+    shell.setAttribute('aria-hidden', 'false');
+    okBtn.onclick = () => finish(input.value);
+    cancelBtn.onclick = () => finish(null);
+    if (backdrop) backdrop.onclick = () => finish(null);
+    input.onkeydown = (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        finish(input.value);
+      }
+    };
+    setTimeout(() => input.focus(), 30);
+  });
+}
+
 async function fetchJson(path, options = {}) {
   const base = await apiBase();
-  const res = await fetch(`${base}${path}`, {
+  const res = await fetch(joinBackendUrl(base, path), {
     headers: { 'Content-Type': 'application/json', ...options.headers },
     ...options
   });
@@ -51,6 +158,15 @@ let libraryActiveName = '';
 let readerBookId = '';
 let readerChapterN = 0;
 let readerToc = [];
+let readerChapterNs = [];
+let readerTocTotal = 0;
+const CHAPTER_TOC_PAGE = 160;
+const BOOKS_PAGE = 120;
+const TRASH_PAGE = 120;
+let booksLoaded = [];
+let booksListMeta = { total: 0 };
+let trashLoaded = [];
+let trashListMeta = { total: 0 };
 
 const THEME_KEY = 'aiw-ui-theme';
 
@@ -91,22 +207,27 @@ function renderReaderMarkdown(content) {
   }
 }
 
+function chapterNavNumbers() {
+  if (readerChapterNs.length) return readerChapterNs.slice().sort((a, b) => a - b);
+  return readerToc.map((x) => x.n).sort((a, b) => a - b);
+}
+
 function updateReaderNav() {
   const nav = document.getElementById('reader-chapter-nav');
   if (!nav) return;
   const hasBook = Boolean(readerBookId);
-  const hasCh = readerChapterN > 0 && readerToc.length > 0;
+  const nums = chapterNavNumbers();
+  const hasCh = readerChapterN > 0 && nums.length > 0;
   nav.hidden = !(hasBook && hasCh);
   const prev = document.getElementById('reader-prev-ch');
   const next = document.getElementById('reader-next-ch');
-  const nums = readerToc.map((x) => x.n).sort((a, b) => a - b);
   const minN = nums.length ? nums[0] : 0;
   const maxN = nums.length ? nums[nums.length - 1] : 0;
   if (prev) prev.disabled = !hasCh || readerChapterN <= minN;
   if (next) next.disabled = !hasCh || readerChapterN >= maxN;
   const exp = document.getElementById('reader-export-txt');
   const del = document.getElementById('reader-delete-book');
-  const showActs = Boolean(readerBookId) && readerToc.length > 0;
+  const showActs = Boolean(readerBookId) && nums.length > 0;
   if (exp) exp.hidden = !showActs;
   if (del) del.hidden = !showActs;
 }
@@ -152,27 +273,25 @@ async function openBookChapter(bookId, chapterN) {
   }
 }
 
-async function selectReaderBook(bookId, titleLabel) {
-  readerBookId = bookId;
-  readerChapterN = 0;
+function renderChapterList(bookId) {
   const chBox = document.getElementById('chapter-list');
-  const hintEl = document.getElementById('reader-book-hint');
-  if (hintEl) hintEl.textContent = titleLabel || bookId;
-  document.querySelectorAll('.library-item--book').forEach((el) => {
-    el.classList.toggle('library-item--active', el.dataset.book === bookId);
-  });
+  const metaEl = document.getElementById('chapter-list-meta');
+  const filterEl = document.getElementById('chapter-list-filter');
   if (!chBox) return;
-  chBox.innerHTML = '加载目录…';
-  try {
-    const { toc } = await fetchJson(`/api/books/${encodeURIComponent(bookId)}/toc`);
-    readerToc = Array.isArray(toc) ? toc : [];
-    chBox.innerHTML = '';
-    if (!readerToc.length) {
-      chBox.innerHTML = '<p class="rail-hint">本书尚无章节文件。</p>';
-      updateReaderNav();
-      return;
-    }
-    for (const row of readerToc) {
+  const q = (filterEl?.value || '').trim().toLowerCase();
+  let rows = readerToc;
+  if (q) {
+    rows = readerToc.filter((row) => {
+      const t = String(row.title || '').toLowerCase();
+      return String(row.n).includes(q) || t.includes(q);
+    });
+  }
+  chBox.innerHTML = '';
+  if (!rows.length) {
+    chBox.innerHTML =
+      '<p class="rail-hint">无匹配章节。可调整筛选词，或先「加载更多章节」再筛。</p>';
+  } else {
+    for (const row of rows) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'library-item library-item--chapter';
@@ -182,35 +301,115 @@ async function selectReaderBook(bookId, titleLabel) {
       btn.addEventListener('click', () => openBookChapter(bookId, row.n));
       chBox.appendChild(btn);
     }
-    const firstN = readerToc[0].n;
-    await openBookChapter(bookId, firstN);
-  } catch (e) {
-    chBox.innerHTML = `<p class="rail-hint">${escapeHtml(e.message)}</p>`;
+  }
+  if (metaEl) {
+    metaEl.textContent = `全书 ${readerTocTotal} 章 · 已加载目录 ${readerToc.length} 条 · 当前显示 ${rows.length} 条`;
   }
 }
 
-async function refreshReaderBooks() {
-  const box = document.getElementById('book-list');
-  if (!box) return;
-  box.innerHTML = '加载中…';
+async function loadMoreChapters() {
+  const bookId = readerBookId;
+  if (!bookId) return;
+  const chMore = document.getElementById('chapter-list-more');
   try {
-    const { books } = await fetchJson('/api/books');
-    if (!books?.length) {
-      box.innerHTML = '<p class="rail-hint">暂无书本。使用「生成全书并入库」创建。</p>';
+    const more = await fetchJson(
+      `/api/books/${encodeURIComponent(bookId)}/toc?limit=${CHAPTER_TOC_PAGE}&offset=${readerToc.length}`
+    );
+    readerToc = readerToc.concat(more.toc || []);
+    renderChapterList(bookId);
+    if (chMore) chMore.hidden = readerToc.length >= readerTocTotal;
+  } catch (e) {
+    void showAppAlert(e.message || String(e));
+  }
+}
+
+async function selectReaderBook(bookId, titleLabel) {
+  readerBookId = bookId;
+  readerChapterN = 0;
+  readerToc = [];
+  readerChapterNs = [];
+  readerTocTotal = 0;
+  const chBox = document.getElementById('chapter-list');
+  const hintEl = document.getElementById('reader-book-hint');
+  const chFilter = document.getElementById('chapter-list-filter');
+  const chMore = document.getElementById('chapter-list-more');
+  if (chFilter) {
+    chFilter.disabled = false;
+    chFilter.value = '';
+  }
+  if (hintEl) hintEl.textContent = titleLabel || bookId;
+  document.querySelectorAll('.library-item--book').forEach((el) => {
+    el.classList.toggle('library-item--active', el.dataset.book === bookId);
+  });
+  if (!chBox) return;
+  chBox.innerHTML = '加载目录…';
+  if (chMore) chMore.hidden = true;
+  try {
+    const nsData = await fetchJson(`/api/books/${encodeURIComponent(bookId)}/chapter-ns`);
+    readerChapterNs = (nsData.ns || []).slice().sort((a, b) => a - b);
+    const t0 = await fetchJson(
+      `/api/books/${encodeURIComponent(bookId)}/toc?limit=${CHAPTER_TOC_PAGE}&offset=0`
+    );
+    readerToc = t0.toc || [];
+    readerTocTotal = typeof t0.total === 'number' ? t0.total : readerToc.length;
+    renderChapterList(bookId);
+    if (chMore) chMore.hidden = readerToc.length >= readerTocTotal;
+    if (!readerChapterNs.length) {
+      chBox.innerHTML = '<p class="rail-hint">本书尚无章节文件。</p>';
+      if (chFilter) chFilter.disabled = true;
+      if (document.getElementById('chapter-list-meta')) {
+        document.getElementById('chapter-list-meta').textContent = '';
+      }
+      updateReaderNav();
       return;
     }
-    box.innerHTML = '';
-    for (const b of books) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'library-item library-item--book';
-      btn.dataset.book = b.id;
-      btn.innerHTML = `<span>${escapeHtml(b.title || b.id)}</span><small>${b.chapter_count || 0} 章 · ${escapeHtml(b.id)}</small>`;
-      btn.addEventListener('click', () => selectReaderBook(b.id, b.title || b.id));
-      box.appendChild(btn);
+    const firstN = readerChapterNs[0];
+    await openBookChapter(bookId, firstN);
+  } catch (e) {
+    chBox.innerHTML = `<p class="rail-hint">${escapeHtml(e.message)}</p>`;
+    if (chFilter) chFilter.disabled = true;
+  }
+}
+
+async function refreshReaderBooks(reset = true) {
+  const box = document.getElementById('book-list');
+  const metaEl = document.getElementById('book-list-meta');
+  const moreBtn = document.getElementById('book-list-more');
+  if (!box) return;
+  if (reset) {
+    booksLoaded = [];
+    box.innerHTML = '加载中…';
+  }
+  try {
+    const offset = reset ? 0 : booksLoaded.length;
+    const q = (document.getElementById('book-list-search')?.value || '').trim();
+    const data = await fetchJson(
+      `/api/books?limit=${BOOKS_PAGE}&offset=${offset}&q=${encodeURIComponent(q)}`
+    );
+    booksListMeta.total = data.total ?? 0;
+    const chunk = data.books || [];
+    if (reset) booksLoaded = chunk.slice();
+    else booksLoaded = booksLoaded.concat(chunk);
+    if (!booksLoaded.length) {
+      box.innerHTML =
+        '<p class="rail-hint">暂无匹配书本。可清空搜索或使用「生成全书并入库」创建。</p>';
+    } else {
+      box.innerHTML = '';
+      for (const b of booksLoaded) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'library-item library-item--book';
+        btn.dataset.book = b.id;
+        btn.innerHTML = `<span>${escapeHtml(b.title || b.id)}</span><small>${b.chapter_count || 0} 章 · ${escapeHtml(b.id)}</small>`;
+        btn.addEventListener('click', () => selectReaderBook(b.id, b.title || b.id));
+        box.appendChild(btn);
+      }
     }
+    if (metaEl) metaEl.textContent = `共 ${booksListMeta.total} 本 · 已显示 ${booksLoaded.length}`;
+    if (moreBtn) moreBtn.hidden = booksLoaded.length >= booksListMeta.total;
   } catch (e) {
     box.innerHTML = `<p class="rail-hint">无法加载书本：${escapeHtml(e.message)}</p>`;
+    if (moreBtn) moreBtn.hidden = true;
   }
 }
 
@@ -249,6 +448,8 @@ async function openLegacyLibraryFile(name) {
   readerBookId = '';
   readerChapterN = 0;
   readerToc = [];
+  readerChapterNs = [];
+  readerTocTotal = 0;
   document.getElementById('reader-chapter-nav').hidden = true;
   const exp = document.getElementById('reader-export-txt');
   const del = document.getElementById('reader-delete-book');
@@ -271,68 +472,87 @@ async function openLegacyLibraryFile(name) {
   }
 }
 
-async function refreshTrashList() {
+function appendTrashItemRow(box, it) {
+  const wrap = document.createElement('div');
+  wrap.className = 'trash-item';
+  const label = document.createElement('div');
+  label.className = 'rail-hint';
+  label.style.marginBottom = '0.35rem';
+  label.textContent = `${it.title || it.id} · ${it.folder || it.id}`;
+  const row = document.createElement('div');
+  row.style.display = 'flex';
+  row.style.flexWrap = 'wrap';
+  row.style.gap = '0.35rem';
+  const br = document.createElement('button');
+  br.type = 'button';
+  br.className = 'btn btn-secondary';
+  br.textContent = '还原';
+  br.addEventListener('click', async () => {
+    if (!(await showAppConfirm('还原此书到书库？', '还原书本'))) return;
+    try {
+      await fetchJson('/api/trash/books/restore', {
+        method: 'POST',
+        body: JSON.stringify({ folder: it.folder || it.id })
+      });
+      await refreshReaderShell();
+    } catch (e) {
+      void showAppAlert(e.message || String(e));
+    }
+  });
+  const bp = document.createElement('button');
+  bp.type = 'button';
+  bp.className = 'btn btn-ghost reader-danger';
+  bp.textContent = '永久删除';
+  bp.addEventListener('click', async () => {
+    if (!(await showAppConfirm('永久删除？不可恢复。', '危险操作', true))) return;
+    try {
+      await fetchJson('/api/trash/books/purge', {
+        method: 'POST',
+        body: JSON.stringify({ folder: it.folder || it.id })
+      });
+      await refreshTrashList(true);
+      await refreshReaderBooks(true);
+    } catch (e) {
+      void showAppAlert(e.message || String(e));
+    }
+  });
+  row.appendChild(br);
+  row.appendChild(bp);
+  wrap.appendChild(label);
+  wrap.appendChild(row);
+  box.appendChild(wrap);
+}
+
+async function refreshTrashList(reset = true) {
   const box = document.getElementById('trash-list');
+  const metaEl = document.getElementById('trash-list-meta');
+  const moreBtn = document.getElementById('trash-list-more');
   if (!box) return;
-  box.innerHTML = '加载中…';
+  if (reset) {
+    trashLoaded = [];
+    box.innerHTML = '加载中…';
+  }
   try {
-    const { items } = await fetchJson('/api/trash/books');
-    if (!items?.length) {
-      box.innerHTML = '<p class="rail-hint">回收站为空。</p>';
-      return;
+    const offset = reset ? 0 : trashLoaded.length;
+    const q = (document.getElementById('trash-list-search')?.value || '').trim();
+    const data = await fetchJson(
+      `/api/trash/books?limit=${TRASH_PAGE}&offset=${offset}&q=${encodeURIComponent(q)}`
+    );
+    trashListMeta.total = data.total ?? 0;
+    const chunk = data.items || [];
+    if (reset) trashLoaded = chunk.slice();
+    else trashLoaded = trashLoaded.concat(chunk);
+    if (!trashLoaded.length) {
+      box.innerHTML = '<p class="rail-hint">回收站为空或无匹配项。</p>';
+    } else {
+      box.innerHTML = '';
+      for (const it of trashLoaded) appendTrashItemRow(box, it);
     }
-    box.innerHTML = '';
-    for (const it of items) {
-      const wrap = document.createElement('div');
-      wrap.className = 'trash-item';
-      const label = document.createElement('div');
-      label.className = 'rail-hint';
-      label.style.marginBottom = '0.35rem';
-      label.textContent = `${it.title || it.id} · ${it.folder || it.id}`;
-      const row = document.createElement('div');
-      row.style.display = 'flex';
-      row.style.flexWrap = 'wrap';
-      row.style.gap = '0.35rem';
-      const br = document.createElement('button');
-      br.type = 'button';
-      br.className = 'btn btn-secondary';
-      br.textContent = '还原';
-      br.addEventListener('click', async () => {
-        if (!window.confirm('还原此书到书库？')) return;
-        try {
-          await fetchJson('/api/trash/books/restore', {
-            method: 'POST',
-            body: JSON.stringify({ folder: it.folder || it.id })
-          });
-          await refreshReaderShell();
-        } catch (e) {
-          window.alert(e.message || String(e));
-        }
-      });
-      const bp = document.createElement('button');
-      bp.type = 'button';
-      bp.className = 'btn btn-ghost reader-danger';
-      bp.textContent = '永久删除';
-      bp.addEventListener('click', async () => {
-        if (!window.confirm('永久删除？不可恢复。')) return;
-        try {
-          await fetchJson('/api/trash/books/purge', {
-            method: 'POST',
-            body: JSON.stringify({ folder: it.folder || it.id })
-          });
-          await refreshTrashList();
-        } catch (e) {
-          window.alert(e.message || String(e));
-        }
-      });
-      row.appendChild(br);
-      row.appendChild(bp);
-      wrap.appendChild(label);
-      wrap.appendChild(row);
-      box.appendChild(wrap);
-    }
+    if (metaEl) metaEl.textContent = `共 ${trashListMeta.total} 项 · 已显示 ${trashLoaded.length}`;
+    if (moreBtn) moreBtn.hidden = trashLoaded.length >= trashListMeta.total;
   } catch (e) {
     box.innerHTML = `<p class="rail-hint">${escapeHtml(e.message)}</p>`;
+    if (moreBtn) moreBtn.hidden = true;
   }
 }
 
@@ -349,12 +569,21 @@ async function refreshMemBookOptions() {
   const cur = sel.value;
   sel.innerHTML = '<option value="">全局记忆宫殿（跨书共享）</option>';
   try {
-    const { books } = await fetchJson('/api/books');
-    for (const b of books || []) {
-      const o = document.createElement('option');
-      o.value = b.id;
-      o.textContent = `${b.title || b.id} · ${b.chapter_count || 0} 章`;
-      sel.appendChild(o);
+    let offset = 0;
+    const lim = 400;
+    let total = Infinity;
+    while (offset < total) {
+      const data = await fetchJson(`/api/books?limit=${lim}&offset=${offset}&q=`);
+      total = data.total ?? 0;
+      const chunk = data.books || [];
+      for (const b of chunk) {
+        const o = document.createElement('option');
+        o.value = b.id;
+        o.textContent = `${b.title || b.id} · ${b.chapter_count || 0} 章`;
+        sel.appendChild(o);
+      }
+      offset += chunk.length;
+      if (!chunk.length) break;
     }
   } catch (e) {
     console.warn('books for memory', e);
@@ -393,11 +622,22 @@ async function refreshSeriesList() {
   ph.textContent = '—— 选择书本或旧书系 ——';
   sel.appendChild(ph);
   try {
-    const { books } = await fetchJson('/api/books');
-    if (books?.length) {
+    let offset = 0;
+    const lim = 400;
+    let total = Infinity;
+    const acc = [];
+    while (offset < total) {
+      const data = await fetchJson(`/api/books?limit=${lim}&offset=${offset}&q=`);
+      total = data.total ?? 0;
+      const chunk = data.books || [];
+      acc.push(...chunk);
+      offset += chunk.length;
+      if (!chunk.length) break;
+    }
+    if (acc.length) {
       const og = document.createElement('optgroup');
       og.label = '书本（books/）';
-      for (const b of books) {
+      for (const b of acc) {
         const o = document.createElement('option');
         o.value = `book:${b.id}`;
         o.textContent = `${b.title || b.id} · ${b.chapter_count || 0} 章`;
@@ -579,7 +819,7 @@ async function refreshMemList() {
       div.appendChild(head);
       div.appendChild(body);
       del.addEventListener('click', async () => {
-        if (!window.confirm('删除该条记忆？')) return;
+        if (!(await showAppConfirm('删除该条记忆？', '删除记忆'))) return;
         try {
           const delUrl = bid
             ? `/api/books/${encodeURIComponent(bid)}/memory/entries/${e.id}`
@@ -587,7 +827,7 @@ async function refreshMemList() {
           await fetchJson(delUrl, { method: 'DELETE' });
           await refreshMemList();
         } catch (err) {
-          alert(err.message);
+          void showAppAlert(err.message);
         }
       });
       box.appendChild(div);
@@ -605,6 +845,34 @@ document.addEventListener('DOMContentLoaded', async () => {
     refreshReaderShell();
   });
 
+  let bookSearchTimer = null;
+  document.getElementById('book-list-search')?.addEventListener('input', () => {
+    clearTimeout(bookSearchTimer);
+    bookSearchTimer = setTimeout(() => refreshReaderBooks(true), 320);
+  });
+  document.getElementById('book-list-more')?.addEventListener('click', () => {
+    void refreshReaderBooks(false);
+  });
+
+  let trashSearchTimer = null;
+  document.getElementById('trash-list-search')?.addEventListener('input', () => {
+    clearTimeout(trashSearchTimer);
+    trashSearchTimer = setTimeout(() => refreshTrashList(true), 320);
+  });
+  document.getElementById('trash-list-more')?.addEventListener('click', () => {
+    void refreshTrashList(false);
+  });
+
+  let chapterFilterTimer = null;
+  document.getElementById('chapter-list-filter')?.addEventListener('input', () => {
+    if (!readerBookId) return;
+    clearTimeout(chapterFilterTimer);
+    chapterFilterTimer = setTimeout(() => renderChapterList(readerBookId), 200);
+  });
+  document.getElementById('chapter-list-more')?.addEventListener('click', () => {
+    void loadMoreChapters();
+  });
+
   document.getElementById('btn-legacy-files-toggle')?.addEventListener('click', () => {
     const el = document.getElementById('legacy-file-list');
     if (!el) return;
@@ -614,15 +882,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   document.getElementById('reader-prev-ch')?.addEventListener('click', () => {
-    if (!readerBookId || !readerToc.length) return;
-    const nums = readerToc.map((x) => x.n).sort((a, b) => a - b);
+    if (!readerBookId) return;
+    const nums = chapterNavNumbers();
+    if (!nums.length) return;
     const i = nums.indexOf(readerChapterN);
     if (i > 0) openBookChapter(readerBookId, nums[i - 1]);
   });
 
   document.getElementById('reader-next-ch')?.addEventListener('click', () => {
-    if (!readerBookId || !readerToc.length) return;
-    const nums = readerToc.map((x) => x.n).sort((a, b) => a - b);
+    if (!readerBookId) return;
+    const nums = chapterNavNumbers();
+    if (!nums.length) return;
     const i = nums.indexOf(readerChapterN);
     if (i >= 0 && i < nums.length - 1) openBookChapter(readerBookId, nums[i + 1]);
   });
@@ -683,7 +953,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('btn-pipeline-full')?.addEventListener('click', async () => {
     const title = document.getElementById('solo-title')?.value?.trim();
     if (!title) {
-      window.alert('请先填写题目 / 书名 / 灵感短语。');
+      void showAppAlert('请先填写题目 / 书名 / 灵感短语。', '缺少题目');
       return;
     }
     const rawN = parseInt(String(document.getElementById('solo-chapters')?.value || '8'), 10);
@@ -723,14 +993,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     };
     try {
       const base = await apiBase();
-      const res = await fetch(`${base}/api/pipeline/from-title/stream`, {
+      const streamUrl = joinBackendUrl(base, '/api/pipeline/from-title/stream');
+      const res = await fetch(streamUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
       if (!res.ok) {
         const t = await res.text();
-        throw new Error(t || res.statusText);
+        let hint = t || res.statusText;
+        if (res.status === 404 && /Not Found|not found/i.test(hint)) {
+          hint +=
+            '\n\n提示：多为本机 18765 端口被旧版后端或其它程序占用。请关闭其它「python uvicorn」终端或冲突程序后，在设置里点「保存并重启后端」。';
+        }
+        throw new Error(hint);
       }
       const reader = res.body.getReader();
       const dec = new TextDecoder();
@@ -807,7 +1083,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (logEl) logEl.textContent = `失败：${e.message}`;
       if (gs) gs.textContent = '';
       if (progLabel) progLabel.textContent = '失败';
-      window.alert(e.message || String(e));
+      void showAppAlert(e.message || String(e), '生成失败');
     } finally {
       if (btn) btn.disabled = false;
     }
@@ -816,7 +1092,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('btn-continue-chapter')?.addEventListener('click', async () => {
     const raw = document.getElementById('series-continue-select')?.value?.trim();
     if (!raw) {
-      window.alert('请先刷新列表并选择一本书本或旧书系。');
+      void showAppAlert('请先刷新列表并选择一本书本或旧书系。', '未选择书系');
       return;
     }
     const logEl = document.getElementById('continue-log');
@@ -847,7 +1123,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         delete payload.run_reader_test;
         delete payload.chapter_count;
       } else {
-        window.alert('选择项格式无效，请刷新列表后重选。');
+        void showAppAlert('选择项格式无效，请刷新列表后重选。', '选择无效');
         return;
       }
       const data = await fetchJson('/api/pipeline/continue', {
@@ -864,11 +1140,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (gs) gs.textContent = '续写已保存，可在书库中阅读。';
       await refreshSeriesList();
       await refreshMemBookOptions();
-      await refreshReaderBooks();
+      await refreshReaderBooks(true);
     } catch (e) {
       if (logEl) logEl.textContent = `失败：${e.message}`;
       if (gs) gs.textContent = '';
-      window.alert(e.message || String(e));
+      void showAppAlert(e.message || String(e), '续写失败');
     } finally {
       if (btn) btn.disabled = false;
     }
@@ -891,7 +1167,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       await refreshThemes();
       await refreshReaderShell();
     } catch (e) {
-      alert(e.message || String(e));
+      void showAppAlert(e.message || String(e), '保存设置失败');
     } finally {
       btn.disabled = false;
     }
@@ -901,28 +1177,62 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!readerBookId) return;
     try {
       const base = await apiBase();
-      const res = await fetch(`${base}/api/books/${encodeURIComponent(readerBookId)}/export.txt`);
+      const url = joinBackendUrl(
+        base,
+        `/api/books/${encodeURIComponent(readerBookId)}/export.txt`
+      );
+      const res = await fetch(url);
       if (!res.ok) throw new Error(await res.text());
       const blob = await res.blob();
       const u = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = u;
-      a.download = `${readerBookId}.txt`;
+      const cd = res.headers.get('Content-Disposition');
+      const m =
+        cd &&
+        (/\bfilename\*=UTF-8''([^;\s]+)/i.exec(cd) || /\bfilename="([^"]+)"/i.exec(cd));
+      let fname = `${readerBookId}.txt`;
+      if (m) {
+        try {
+          fname = decodeURIComponent(m[1] || m[2] || fname);
+        } catch {
+          fname = m[1] || m[2] || fname;
+        }
+      }
+      a.download = fname;
+      a.rel = 'noopener';
+      document.body.appendChild(a);
       a.click();
+      document.body.removeChild(a);
       URL.revokeObjectURL(u);
     } catch (e) {
-      window.alert(e.message || String(e));
+      void showAppAlert(e.message || String(e), '导出失败');
     }
   });
 
   document.getElementById('reader-delete-book')?.addEventListener('click', async () => {
     if (!readerBookId) return;
-    if (!window.confirm('将本书移入回收站？可在左侧「回收站」还原。')) return;
+    if (
+      !(await showAppConfirm(
+        '将本书移入回收站？可在左侧「回收站」还原。',
+        '移入回收站'
+      ))
+    )
+      return;
     try {
       await fetchJson(`/api/books/${encodeURIComponent(readerBookId)}`, { method: 'DELETE' });
       readerBookId = '';
       readerChapterN = 0;
       readerToc = [];
+      readerChapterNs = [];
+      readerTocTotal = 0;
+      const cf = document.getElementById('chapter-list-filter');
+      if (cf) {
+        cf.value = '';
+        cf.disabled = true;
+      }
+      const cmeta = document.getElementById('chapter-list-meta');
+      if (cmeta) cmeta.textContent = '';
       document.getElementById('reader-content').innerHTML = '';
       document.getElementById('reader-doc-title').textContent = '选择书本与章节';
       document.getElementById('reader-meta').textContent = '';
@@ -930,9 +1240,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('reader-export-txt').hidden = true;
       document.getElementById('reader-delete-book').hidden = true;
       document.getElementById('chapter-list').innerHTML = '';
+      const chMore = document.getElementById('chapter-list-more');
+      if (chMore) chMore.hidden = true;
       await refreshReaderShell();
     } catch (e) {
-      window.alert(e.message || String(e));
+      void showAppAlert(e.message || String(e));
     }
   });
 
@@ -993,16 +1305,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   btnSave.addEventListener('click', async () => {
     const content = chapterOut.textContent.trim();
     if (!content) return;
-    const name = window.prompt('文件名（不含路径）', 'chapter-01');
-    if (!name) return;
+    const name = await showAppPrompt(
+      '将保存到 UserData/out 目录',
+      'chapter-01',
+      '保存章节',
+      '文件名（不含路径）'
+    );
+    if (name == null || !String(name).trim()) return;
     try {
       await fetchJson('/api/save-chapter', {
         method: 'POST',
-        body: JSON.stringify({ filename: name, content })
+        body: JSON.stringify({ filename: String(name).trim(), content })
       });
       genStatus.textContent = '已保存到 UserData/out（可在「书库阅读」中打开）';
     } catch (e) {
-      alert(e.message);
+      void showAppAlert(e.message);
     }
   });
 
@@ -1017,7 +1334,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
       genStatus.textContent = '总摘要已保存';
     } catch (e) {
-      alert(e.message);
+      void showAppAlert(e.message);
     }
   });
 
@@ -1028,7 +1345,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const chapter_label = document.getElementById('mem-chapter').value.trim() || null;
     const bid = memoryBookId();
     if (!title || !bodyText) {
-      alert('请填写标题与内容');
+      void showAppAlert('请填写标题与内容', '记忆条目');
       return;
     }
     try {
@@ -1042,7 +1359,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       await refreshMemList();
       genStatus.textContent = '已添加记忆条目';
     } catch (e) {
-      alert(e.message);
+      void showAppAlert(e.message);
     }
   });
 
@@ -1054,10 +1371,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('btn-mem-extract')?.addEventListener('click', async () => {
     const text = chapterOut.textContent.trim();
     if (text.length < 20) {
-      alert('请先生成或粘贴本章正文');
+      void showAppAlert('请先生成或粘贴本章正文', '萃取记忆');
       return;
     }
-    const chapter_label = window.prompt('章节标签（可选）', '当前章') || null;
+    const rawLabel = await showAppPrompt(
+      '用于在记忆列表中标注来源（可留空表示无）',
+      '当前章',
+      '章节标签',
+      '标签（可选）'
+    );
+    const chapter_label = rawLabel != null && String(rawLabel).trim() ? String(rawLabel).trim() : null;
     const bid = memoryBookId();
     genStatus.textContent = '正在萃取记忆（调用模型）…';
     try {
@@ -1070,7 +1393,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       genStatus.textContent = '已萃取并写入「情节」房间';
     } catch (e) {
       genStatus.textContent = '';
-      alert(e.message);
+      void showAppAlert(e.message);
     }
   });
 });
