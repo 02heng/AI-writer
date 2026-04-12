@@ -36,6 +36,7 @@ from .book_storage import (
 from .library_fs import list_out_markdown, list_series, safe_out_md_path, safe_series_prefix
 from .llm import chat_completion, stream_chat_completion
 from .pipeline import (
+    MAX_PIPELINE_CHAPTERS,
     run_continue_chapters,
     run_continue_next_chapter,
     run_continue_next_chapter_legacy_out,
@@ -178,7 +179,7 @@ class PipelineFromTitleBody(BaseModel):
 
     title: str = Field(..., min_length=1, max_length=200)
     theme_id: Optional[str] = Field(default="general")
-    max_chapters: int = Field(default=8, ge=3, le=25)
+    max_chapters: int = Field(default=8, ge=3, le=MAX_PIPELINE_CHAPTERS)
     length_scale: str = Field(
         default="medium",
         description="short=短篇, medium=中篇, long=长篇",
@@ -265,7 +266,7 @@ def _compose_system(base_system: str, theme_id: Optional[str]) -> str:
 
 
 # 递增：Electron 启动时用于识别「本机 18765 上是否为当前应用的后端」，避免旧版/他进程占位导致 404。
-API_REVISION = 2
+API_REVISION = 3
 
 
 @app.get("/api/health")
@@ -274,6 +275,7 @@ def health():
     return {
         "ok": True,
         "api_revision": API_REVISION,
+        "max_pipeline_chapters": MAX_PIPELINE_CHAPTERS,
         "pipeline_stream": True,
         "user_data": str(ROOT),
         "books_root": str(books_root(ROOT)),

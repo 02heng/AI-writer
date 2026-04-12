@@ -1009,7 +1009,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
     const rawN = parseInt(String(document.getElementById('solo-chapters')?.value || '8'), 10);
-    const maxChapters = Number.isFinite(rawN) ? Math.min(25, Math.max(3, rawN)) : 8;
+    const maxChapters = Number.isFinite(rawN) ? Math.min(500, Math.max(3, rawN)) : 8;
     const lengthScale = document.getElementById('solo-length')?.value || 'medium';
     const protagonistGender = document.getElementById('solo-gender')?.value || 'any';
     const btn = document.getElementById('btn-pipeline-full');

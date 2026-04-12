@@ -121,7 +121,7 @@
                 </div>
                 <div>
                   <label class="lbl" for="solo-chapters">总章数</label>
-                  <input type="number" id="solo-chapters" class="inp" min="3" max="25" value="8" />
+                  <input type="number" id="solo-chapters" class="inp" min="3" max="500" value="8" />
                 </div>
                 <div>
                   <label class="lbl" for="pipeline-agent-profile">编排模式</label>
@@ -143,7 +143,8 @@
                     <span>生成时注入长期记忆（本书宫殿 + 可选全局宫殿）</span>
                   </label>
                   <p class="rail-hint">
-                    快速模式约「章数 + 1」次 API；完整模式每章多次调用。章数越多越慢。
+                    快速模式约「章数 + 策划分批 + 开笔备案 1 次」次 API；完整模式每章多次调用。超过 20
+                    章会分批策划；上限 500 章耗时可极长、费用高。开笔前会自动写入记忆宫殿四类长程约束。
                   </p>
                 </div>
                 <div class="form-actions">

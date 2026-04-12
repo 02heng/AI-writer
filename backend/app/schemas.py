@@ -39,9 +39,9 @@ BOOK_PLAN_SCHEMA: dict[str, Any] = {
         },
         "premise": {
             "type": "string",
-            "minLength": 100,
-            "maxLength": 800,
-            "description": "Overall plot summary in 100-800 characters",
+            "minLength": 50,
+            "maxLength": 4000,
+            "description": "Overall plot summary",
         },
         "meta": {
             "type": "object",
@@ -57,14 +57,14 @@ BOOK_PLAN_SCHEMA: dict[str, Any] = {
                 "chapter_count": {
                     "type": "integer",
                     "minimum": 3,
-                    "maximum": 25,
+                    "maximum": 500,
                 },
             },
         },
         "chapters": {
             "type": "array",
             "minItems": 3,
-            "maxItems": 25,
+            "maxItems": 500,
             "items": {"$ref": "#/$defs/chapter"},
         },
     },
@@ -76,7 +76,7 @@ BOOK_PLAN_SCHEMA: dict[str, Any] = {
                 "idx": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 25,
+                    "maximum": 999,
                     "description": "Chapter number (1-indexed)",
                 },
                 "beat": {

@@ -20,15 +20,46 @@ from .book_storage import (
 from .core.logging import get_logger, LogContext
 from .jsonutil import extract_json_object
 from .llm import chat_completion
-from .memory_store import add_entry, build_memory_context, read_rollup, write_rollup
+from .memory_store import add_entry, build_memory_context, init_db, read_rollup, write_rollup
 from .orchestration.runner import orchestrator_bump_state, run_chapter_with_agents
-from .schemas import validate_book_plan
 from .scene_writer import generate_chapter_with_scenes
 from .layered_memory import build_context_for_chapter
 
 logger = get_logger(__name__)
 
 ProgressCb = Optional[Callable[[dict[str, Any]], None]]
+
+# 一键生成上限；超过 PLAN_SINGLE_SHOT_MAX 章时用分批策划，避免单次 JSON 过大导致模型截断或语法错误。
+MAX_PIPELINE_CHAPTERS = 500
+PLAN_SINGLE_SHOT_MAX = 20
+PLAN_BATCH_SIZE = 20
+
+
+def _chat_plan_json(system: str, user: str, temperature: float, *, attempts: int = 3) -> dict[str, Any]:
+    """调用模型并解析 JSON 对象；失败则降温重试，提示避免尾逗号与非法换行。"""
+    last_err: Exception | None = None
+    for i in range(max(1, attempts)):
+        strict = ""
+        if i > 0:
+            strict = (
+                " 上次输出无法解析：只输出一个 JSON 对象；键值对之间与数组元素末尾禁止多余逗号；"
+                "字符串内双引号须转义为 \\\"；字符串内禁止真实换行（改用 \\\\n）。"
+            )
+        u = user if i == 0 else user + "\n【重试】仅输出合法 JSON，不要其它文字。"
+        try:
+            raw = chat_completion(
+                system=system + strict,
+                user=u,
+                temperature=max(0.28, temperature - 0.08 * i),
+            )
+            data = extract_json_object(raw)
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            last_err = e
+            continue
+    assert last_err is not None
+    raise last_err
 
 
 def _heading_titles_equal(line_title: str, want: str) -> bool:
@@ -127,6 +158,7 @@ def _normalize_chapter_entry(c: dict[str, Any], fallback_idx: int) -> Optional[d
     except (TypeError, ValueError):
         idx = fallback_idx
     beat = str(c.get("beat", "")).strip()
+    beat = re.sub(r"\s+", " ", beat)
     if not beat:
         return None
     title_raw = str(c.get("title") or "").strip()
@@ -194,6 +226,244 @@ def _format_chapter_contract(idx: int, ch: dict[str, Any], *, continuation: bool
     return "\n".join(lines)
 
 
+def _plan_from_title_single(
+    *,
+    title: str,
+    theme_hint: str,
+    chapter_count: int,
+    length_scale: str,
+    protagonist_gender: str,
+    temperature: float,
+) -> dict[str, Any]:
+    n = max(3, min(int(chapter_count), PLAN_SINGLE_SHOT_MAX))
+    compact = n > 10
+    if compact:
+        sys_p = (
+            "你是中文小说总策划。只输出一个 JSON 对象，禁止 Markdown 代码围栏与任何解释。"
+            '{"book_title":"string","premise":"string 全书梗概 200-380 字",'
+            '"chapters":[{"idx":1,"title":"4-12字","beat":"80-150字"},...]}'
+            f" chapters 必须恰好 {n} 条，idx 从 1 到 {n} 连续无跳号。"
+            "每章仅有 idx、title、beat 三个键；beat 为一段连续文字，场景+冲突+悬念，"
+            "禁止在字符串值内换行；禁止英文双引号出现在字符串值中（用单引号或书名号代替）；禁止数组/对象尾逗号。"
+        )
+    else:
+        sys_p = (
+            "你是中文小说总策划。用户会给出题目、篇幅、主角性别与固定章数。"
+            "你要完整构思：书名定稿、全书梗概、分章结构（每章含可执行写作合同字段）。"
+            "只输出一个 JSON 对象，禁止 Markdown 代码围栏，禁止解释。"
+            "格式严格为："
+            '{"book_title":"string","premise":"string 200-400字梗概",'
+            '"chapters":['
+            '{"idx":1,'
+            '"title":"string 必填，本章标题4-14字，用于目录与记忆检索，勿用标点堆砌",'
+            '"beat":"string 必填，每章120-200字内要点：场景目标+冲突推进+章末悬念",'
+            '"pov":"string 可选，叙事视角如 第三人称限定主角/全知 等",'
+            '"scenes":["string 可选1-3条，具体场景或节拍"],'
+            '"conflict":"string 可选，本章核心冲突一句",'
+            '"hook_end":"string 可选，章末钩子一句",'
+            '"kb_tags":["string 可选，需与设定照应的关键词"],'
+            '"characters_present":["string 可选，本章出场人物简称"]'
+            "},...]}"
+            f"严格要求：chapters 数组长度必须恰好等于 {n}，idx 从 1 到 {n} 连续无跳号；"
+            "每章 beat 必填，其余可选字段能填尽量填以提升后文一致性；不要使用尾逗号。"
+        )
+    user_p = f"题目：{title.strip()}\n"
+    user_p += f"总章数（必须严格遵守）：恰好 {n} 章。\n"
+    user_p += _scale_instruction(length_scale) + "\n"
+    user_p += _protagonist_instruction(protagonist_gender) + "\n"
+    if theme_hint:
+        user_p += f"题材说明：{theme_hint}\n"
+
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            if attempt == 0:
+                raw = chat_completion(system=sys_p, user=user_p, temperature=temperature)
+            elif attempt == 1:
+                raw = chat_completion(
+                    system=sys_p + " 输出必须是严格合法 JSON（RFC 8259），勿尾逗号，字符串内勿未转义换行。",
+                    user=user_p + "\n上次输出无法解析。请仅重发完整 JSON 对象。",
+                    temperature=max(0.32, temperature - 0.22),
+                )
+            else:
+                raw = chat_completion(
+                    system=sys_p + " 仅输出 JSON；若须缩短请优先缩短 beat，仍保持合法 JSON。",
+                    user=user_p + "\n已连续解析失败。请极度精简每章 beat，确保整段可被 json.loads 解析。",
+                    temperature=0.28,
+                )
+            data = extract_json_object(raw)
+            if not isinstance(data, dict):
+                raise ValueError("JSON 根须为对象")
+            chapters = data.get("chapters")
+            if not isinstance(chapters, list) or len(chapters) < 1:
+                raise ValueError("chapters 无效")
+            return data
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            last_err = e
+            continue
+    raise last_err if last_err else ValueError("策划 JSON 解析失败")
+
+
+def _plan_book_meta(
+    *,
+    title: str,
+    theme_hint: str,
+    total_chapters: int,
+    length_scale: str,
+    protagonist_gender: str,
+    temperature: float,
+) -> tuple[str, str]:
+    sys_p = (
+        "你是中文小说总策划。只输出一个 JSON 对象，禁止 Markdown。"
+        '{"book_title":"string","premise":"string 全书梗概 350-700 字"}'
+        " 须合法 JSON：无尾逗号，字符串内勿换行。"
+    )
+    user_p = (
+        f"题目：{title.strip()}\n"
+        f"全书共 {total_chapters} 章（分章要点将分批生成，此处只输出书名定稿与全书梗概）。\n"
+        f"{_scale_instruction(length_scale)}\n"
+        f"{_protagonist_instruction(protagonist_gender)}\n"
+    )
+    if theme_hint:
+        user_p += f"题材说明：{theme_hint}\n"
+
+    last_err: Exception | None = None
+    for attempt in range(2):
+        try:
+            raw = chat_completion(
+                system=sys_p,
+                user=user_p if attempt == 0 else user_p + "\n上次 JSON 无效，请仅输出合法 JSON 对象。",
+                temperature=max(0.35, temperature - 0.12 * attempt),
+            )
+            data = extract_json_object(raw)
+            book_title = str(data.get("book_title") or "").strip() or title.strip()
+            premise = str(data.get("premise") or "").strip()
+            if len(premise) < 80:
+                raise ValueError("梗概过短")
+            return book_title, premise
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            last_err = e
+    raise last_err if last_err else ValueError("书名/梗概策划失败")
+
+
+def _plan_chapters_slice(
+    *,
+    title: str,
+    book_title: str,
+    premise: str,
+    theme_hint: str,
+    start_idx: int,
+    end_idx: int,
+    length_scale: str,
+    protagonist_gender: str,
+    temperature: float,
+    prev_tail_hint: str,
+) -> list[dict[str, Any]]:
+    k = end_idx - start_idx + 1
+    sys_p = (
+        "你是中文小说分章策划。只输出一个 JSON 对象："
+        '{"chapters":[{"idx":int,"title":"4-12字","beat":"70-130字"},...]}'
+        f" chapters 必须恰好 {k} 条，idx 从 {start_idx} 到 {end_idx} 每条唯一且连续。"
+        "仅允许 idx、title、beat 三键；beat 为一段无换行文字；禁止尾逗号与 Markdown。"
+    )
+    user_p = (
+        f"原始题目：{title.strip()}\n书名：{book_title}\n【全书梗概】\n{premise}\n"
+        f"{_scale_instruction(length_scale)}\n{_protagonist_instruction(protagonist_gender)}\n"
+    )
+    if theme_hint:
+        user_p += f"题材说明：{theme_hint}\n"
+    user_p += f"请给出第 {start_idx} 章至第 {end_idx} 章的写作要点（须与全书梗概及叙事节奏一致）。\n"
+    if prev_tail_hint.strip():
+        user_p += prev_tail_hint
+
+    need = set(range(start_idx, end_idx + 1))
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            raw = chat_completion(
+                system=sys_p,
+                user=user_p
+                if attempt == 0
+                else user_p + "\n上次输出无法解析为 JSON。请重发，beat 内勿换行、勿尾逗号。",
+                temperature=max(0.28, temperature - 0.1 * attempt),
+            )
+            data = extract_json_object(raw)
+            chs = data.get("chapters")
+            if not isinstance(chs, list):
+                raise ValueError("chapters 无效")
+            out: list[dict[str, Any]] = []
+            seen: set[int] = set()
+            for c in chs:
+                if not isinstance(c, dict):
+                    continue
+                norm = _normalize_chapter_entry(c, 0)
+                if not norm:
+                    continue
+                ix = int(norm["idx"])
+                if ix in seen or ix not in need:
+                    continue
+                seen.add(ix)
+                out.append(norm)
+            if seen != need:
+                raise ValueError(f"本批需 idx {sorted(need)}，实际 {sorted(seen)}")
+            out.sort(key=lambda x: int(x["idx"]))
+            return out
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            last_err = e
+    raise last_err if last_err else ValueError("分批策划 JSON 失败")
+
+
+def _plan_from_title_batched(
+    *,
+    title: str,
+    theme_hint: str,
+    chapter_count: int,
+    length_scale: str,
+    protagonist_gender: str,
+    temperature: float,
+) -> dict[str, Any]:
+    n = max(3, min(int(chapter_count), MAX_PIPELINE_CHAPTERS))
+    book_title, premise = _plan_book_meta(
+        title=title,
+        theme_hint=theme_hint,
+        total_chapters=n,
+        length_scale=length_scale,
+        protagonist_gender=protagonist_gender,
+        temperature=temperature,
+    )
+    all_ch: list[dict[str, Any]] = []
+    start = 1
+    while start <= n:
+        end = min(start + PLAN_BATCH_SIZE - 1, n)
+        prev_tail = ""
+        if all_ch:
+            tail = all_ch[-2:] if len(all_ch) >= 2 else all_ch[-1:]
+            lines = [
+                f"第 {c['idx']} 章「{str(c.get('title', ''))[:40]}」：{str(c.get('beat', ''))[:120]}"
+                for c in tail
+            ]
+            prev_tail = "【上一批末章摘要（须衔接）】\n" + "\n".join(lines) + "\n"
+        batch = _plan_chapters_slice(
+            title=title,
+            book_title=book_title,
+            premise=premise,
+            theme_hint=theme_hint,
+            start_idx=start,
+            end_idx=end,
+            length_scale=length_scale,
+            protagonist_gender=protagonist_gender,
+            temperature=temperature,
+            prev_tail_hint=prev_tail,
+        )
+        all_ch.extend(batch)
+        start = end + 1
+
+    if len(all_ch) != n:
+        raise ValueError(f"分批策划章数不足：需要 {n}，得到 {len(all_ch)}")
+    all_ch.sort(key=lambda x: int(x["idx"]))
+    return {"book_title": book_title, "premise": premise, "chapters": all_ch}
+
+
 def _plan_from_title(
     *,
     title: str,
@@ -203,49 +473,24 @@ def _plan_from_title(
     protagonist_gender: str,
     temperature: float,
 ) -> dict[str, Any]:
-    n = max(3, min(int(chapter_count), 25))
-    sys_p = (
-        "你是中文小说总策划。用户会给出题目、篇幅、主角性别与固定章数。"
-        "你要完整构思：书名定稿、全书梗概、分章结构（每章含可执行写作合同字段）。"
-        "只输出一个 JSON 对象，禁止 Markdown 代码围栏，禁止解释。"
-        "格式严格为："
-        '{"book_title":"string","premise":"string 200-400字梗概",'
-        '"chapters":['
-        '{"idx":1,'
-        '"title":"string 必填，本章标题4-14字，用于目录与记忆检索，勿用标点堆砌",'
-        '"beat":"string 必填，每章120-200字内要点：场景目标+冲突推进+章末悬念",'
-        '"pov":"string 可选，叙事视角如 第三人称限定主角/全知 等",'
-        '"scenes":["string 可选1-3条，具体场景或节拍"],'
-        '"conflict":"string 可选，本章核心冲突一句",'
-        '"hook_end":"string 可选，章末钩子一句",'
-        '"kb_tags":["string 可选，需与设定照应的关键词"],'
-        '"characters_present":["string 可选，本章出场人物简称"]'
-        "},...]}"
-        f"严格要求：chapters 数组长度必须恰好等于 {n}，idx 从 1 到 {n} 连续无跳号；"
-        "每章 beat 必填，其余可选字段能填尽量填以提升后文一致性。"
-    )
-    user_p = f"题目：{title.strip()}\n"
-    user_p += f"总章数（必须严格遵守）：恰好 {n} 章。\n"
-    user_p += _scale_instruction(length_scale) + "\n"
-    user_p += _protagonist_instruction(protagonist_gender) + "\n"
-    if theme_hint:
-        user_p += f"题材说明：{theme_hint}\n"
-    raw = chat_completion(system=sys_p, user=user_p, temperature=temperature)
-    try:
-        data = extract_json_object(raw)
-    except (json.JSONDecodeError, ValueError) as e:
-        raw2 = chat_completion(
-            system=sys_p + " 若上次输出有误，这次务必仅输出合法 JSON。",
-            user=user_p + "\n上次模型输出无法解析，请重给 JSON。",
-            temperature=max(0.3, temperature - 0.2),
+    n = max(3, min(int(chapter_count), MAX_PIPELINE_CHAPTERS))
+    if n <= PLAN_SINGLE_SHOT_MAX:
+        return _plan_from_title_single(
+            title=title,
+            theme_hint=theme_hint,
+            chapter_count=n,
+            length_scale=length_scale,
+            protagonist_gender=protagonist_gender,
+            temperature=temperature,
         )
-        data = extract_json_object(raw2)
-    if not isinstance(data, dict):
-        raise ValueError("JSON 根须为对象")
-    chapters = data.get("chapters")
-    if not isinstance(chapters, list) or len(chapters) < 1:
-        raise ValueError("chapters 无效")
-    return data
+    return _plan_from_title_batched(
+        title=title,
+        theme_hint=theme_hint,
+        chapter_count=n,
+        length_scale=length_scale,
+        protagonist_gender=protagonist_gender,
+        temperature=temperature,
+    )
 
 
 def _append_rollup_chapter_snippet(
@@ -300,6 +545,136 @@ def _sync_book_memory_entries(
     )
 
 
+def _compact_outline_for_canon(chapters: list[dict[str, Any]], n: int) -> str:
+    """缩略分章信息供开笔前约束备案使用，避免数百章要点撑爆上下文。"""
+
+    def line(c: dict[str, Any]) -> str:
+        i = int(c["idx"])
+        t = str(c.get("title", ""))[:36]
+        b = re.sub(r"\s+", " ", str(c.get("beat", "")).strip())[:120]
+        return f"{i}.「{t}」{b}"
+
+    if n <= 60:
+        return "\n".join(line(c) for c in chapters)
+
+    head_n = min(40, max(20, n // 8))
+    tail_n = min(40, max(20, n // 8))
+    head = chapters[:head_n]
+    tail = chapters[-tail_n:]
+    middle = chapters[head_n : n - tail_n]
+    step = max(len(middle) // 20, 1)
+    samples = [middle[i] for i in range(0, len(middle), step)][:20]
+    parts: list[str] = ["【开篇】" + "\n".join(line(c) for c in head)]
+    if samples:
+        parts.append("【中段抽样】" + "\n".join(line(c) for c in samples))
+    parts.append("【后段】" + "\n".join(line(c) for c in tail))
+    return "\n\n".join(parts)
+
+
+def _seed_series_canon_memory(
+    *,
+    book_path: Path,
+    book_title: str,
+    premise: str,
+    theme_hint: str,
+    length_scale: str,
+    protagonist_gender: str,
+    chapters: list[dict[str, Any]],
+    n_target: int,
+    temperature: float,
+) -> None:
+    """开笔前：世界观/人物/伏笔/时间线写入本书记忆宫殿与条目（与长期记忆约定一致）。"""
+    compact = _compact_outline_for_canon(chapters, n_target)
+    sys_p = (
+        "你是长篇小说设定总监。根据书名、梗概与分章缩略，整理四类「长程写作约束」，"
+        "后续数百章须遵守以防吃书。只输出一个 JSON 对象，禁止 Markdown 围栏。"
+        '{"world_rules":"","character_anchors":"","open_loops":"","timeline_irreversible":""}'
+        "四键均为字符串，用中文短句，句间用中文分号；不要剧情散文复述。"
+        "world_rules：世界观硬规则、力量体系、社会结构、科技/魔法边界、绝不能自相矛盾的设定。"
+        "character_anchors：姓名拼写、年龄辈分关系、核心动机、口癖或说话习惯、标志性外貌或道具，防OOC。"
+        "open_loops：尚未收回的伏笔与承诺，谁承诺了什么、双关、物件未解释等，附状态如未解释或预计第N章收回。"
+        "timeline_irreversible：生死、叛变、大战结果、关键日期地点等不可逆事实，年表式短句。"
+        "信息不足可写「待正文补充」；字符串内禁止未转义英文双引号；禁止尾逗号。"
+    )
+    user_p = (
+        f"书名：{book_title}\n计划总章数：{n_target}\n【全书梗概】\n{premise}\n"
+        f"{_scale_instruction(length_scale)}\n{_protagonist_instruction(protagonist_gender)}\n"
+    )
+    if theme_hint:
+        user_p += f"题材说明：{theme_hint}\n"
+    user_p += f"【分章缩略】\n{compact[:16000]}\n"
+
+    data: dict[str, Any] | None = None
+    last_err: Exception | None = None
+    for att in range(2):
+        try:
+            raw = chat_completion(
+                system=sys_p,
+                user=user_p if att == 0 else user_p + "\n上次输出无法解析为 JSON，请仅输出合法 JSON。",
+                temperature=max(0.32, temperature - 0.18 * att),
+            )
+            data = extract_json_object(raw)
+            break
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            last_err = e
+    if not isinstance(data, dict):
+        logger.warning("series canon memory skipped: %s", last_err)
+        return
+
+    wr = str(data.get("world_rules", "")).strip() or "（待正文补充）"
+    ca = str(data.get("character_anchors", "")).strip() or "（待正文补充）"
+    ol = str(data.get("open_loops", "")).strip() or "（待正文补充）"
+    ti = str(data.get("timeline_irreversible", "")).strip() or "（待正文补充）"
+
+    try:
+        init_db(book_path)
+        existing = read_rollup(book_path).strip()
+        stamp = time.strftime("%Y-%m-%d %H:%M")
+        block = (
+            f"# 全书约束备案（开笔前自动生成 · {stamp}）\n\n"
+            f"## 世界观硬规则\n{wr}\n\n"
+            f"## 人物恒定锚点\n{ca}\n\n"
+            f"## 开放伏笔与承诺\n{ol}\n\n"
+            f"## 不可逆事实与时间线\n{ti}\n"
+        )
+        if existing:
+            write_rollup(book_path, block + "\n\n---\n\n" + existing)
+        else:
+            write_rollup(book_path, block)
+
+        cap = 12000
+        add_entry(
+            book_path,
+            room="世界观",
+            title="开笔备案 · 硬规则与边界",
+            body=wr[:cap],
+            chapter_label="策划",
+        )
+        add_entry(
+            book_path,
+            room="人物",
+            title="开笔备案 · 人物锚点",
+            body=ca[:cap],
+            chapter_label="策划",
+        )
+        add_entry(
+            book_path,
+            room="伏笔",
+            title="开笔备案 · 开放伏笔与承诺",
+            body=ol[:cap],
+            chapter_label="策划",
+        )
+        add_entry(
+            book_path,
+            room="情节",
+            title="开笔备案 · 不可逆事实与时间线",
+            body=ti[:cap],
+            chapter_label="策划",
+        )
+    except OSError as e:
+        logger.warning("series canon memory write failed: %s", e)
+
+
 def run_pipeline_from_title(
     *,
     root: Path,
@@ -334,7 +709,7 @@ def run_pipeline_from_title(
         progress_cb({"event": "phase", "phase": "planning", "message": "正在策划全书结构…"})
 
     try:
-        n_ch = max(3, min(int(max_chapters), 25))
+        n_ch = max(3, min(int(max_chapters), MAX_PIPELINE_CHAPTERS))
         plan_raw = _plan_from_title(
             title=title,
             theme_hint=theme_hint,
@@ -365,7 +740,7 @@ def run_pipeline_from_title(
     chapters.sort(key=lambda x: x["idx"])
     if len(chapters) < 1:
         raise HTTPException(502, "未能得到有效分章列表")
-    n_target = max(3, min(int(max_chapters), 25))
+    n_target = max(3, min(int(max_chapters), MAX_PIPELINE_CHAPTERS))
     seen_idx: set[int] = set()
     deduped: list[dict[str, Any]] = []
     for c in chapters:
@@ -402,6 +777,27 @@ def run_pipeline_from_title(
     )
     book_id = str(created["book_id"])
     book_path = book_dir(root, book_id)
+
+    if sync_book_memory:
+        if progress_cb:
+            progress_cb(
+                {
+                    "event": "phase",
+                    "phase": "canon_memory",
+                    "message": "正在生成全书约束并写入记忆宫殿（开笔备案）…",
+                }
+            )
+        _seed_series_canon_memory(
+            book_path=book_path,
+            book_title=book_title,
+            premise=premise,
+            theme_hint=theme_hint,
+            length_scale=length_scale,
+            protagonist_gender=protagonist_gender,
+            chapters=chapters,
+            n_target=n_target,
+            temperature=planning_temp,
+        )
 
     plan_ms = int((time.perf_counter() - t0) * 1000)
     if progress_cb:
@@ -555,7 +951,7 @@ def run_continue_next_chapter(
     nums.sort(key=lambda x: x[0])
     last_n, last_path = nums[-1]
     next_n = last_n + 1
-    if next_n > 99:
+    if next_n > MAX_PIPELINE_CHAPTERS:
         raise HTTPException(status_code=400, detail="章节序号过大")
 
     plan_data = get_plan(root, book_id)
@@ -783,7 +1179,7 @@ def run_continue_next_chapter_legacy_out(
     nums.sort(key=lambda x: x[0])
     last_n, last_path = nums[-1]
     next_n = last_n + 1
-    if next_n > 99:
+    if next_n > MAX_PIPELINE_CHAPTERS:
         raise HTTPException(status_code=400, detail="章节序号过大，请新建书系")
 
     plan_path = out_dir / f"{prefix}_策划.json"
