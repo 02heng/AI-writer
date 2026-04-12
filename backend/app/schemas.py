@@ -57,14 +57,30 @@ BOOK_PLAN_SCHEMA: dict[str, Any] = {
                 "chapter_count": {
                     "type": "integer",
                     "minimum": 3,
-                    "maximum": 500,
+                    "maximum": 1500,
+                    "description": "本轮写入 plan 的分章数（一键生成上限）",
+                },
+                "chapters_this_run": {
+                    "type": "integer",
+                    "minimum": 3,
+                    "maximum": 1500,
+                },
+                "planned_total_chapters": {
+                    "type": "integer",
+                    "minimum": 3,
+                    "maximum": 5000,
+                    "description": "用户声明的全书预定总尺度，可大于 chapter_count",
+                },
+                "macro_outline": {
+                    "type": "object",
+                    "description": "两阶策划宏观阶段表（phases、ending_direction 等）",
                 },
             },
         },
         "chapters": {
             "type": "array",
             "minItems": 3,
-            "maxItems": 500,
+            "maxItems": 1500,
             "items": {"$ref": "#/$defs/chapter"},
         },
     },
@@ -76,7 +92,7 @@ BOOK_PLAN_SCHEMA: dict[str, Any] = {
                 "idx": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 999,
+                    "maximum": 1500,
                     "description": "Chapter number (1-indexed)",
                 },
                 "beat": {

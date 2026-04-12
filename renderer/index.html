@@ -120,8 +120,20 @@
                   </select>
                 </div>
                 <div>
-                  <label class="lbl" for="solo-chapters">总章数</label>
-                  <input type="number" id="solo-chapters" class="inp" min="3" max="500" value="8" />
+                  <label class="lbl" for="solo-chapters">本轮生成章数</label>
+                  <input type="number" id="solo-chapters" class="inp" min="3" max="1500" value="8" />
+                </div>
+                <div>
+                  <label class="lbl" for="solo-planned-total">预定总章数（可选）</label>
+                  <input
+                    type="number"
+                    id="solo-planned-total"
+                    class="inp"
+                    min="3"
+                    max="5000"
+                    value=""
+                    placeholder="留空=与本轮相同"
+                  />
                 </div>
                 <div>
                   <label class="lbl" for="pipeline-agent-profile">编排模式</label>
@@ -144,7 +156,8 @@
                   </label>
                   <p class="rail-hint">
                     快速模式约「章数 + 策划分批 + 开笔备案 1 次」次 API；完整模式每章多次调用。超过 20
-                    章会分批策划；上限 500 章耗时可极长、费用高。开笔前会自动写入记忆宫殿四类长程约束。
+                    章会分批策划；一键最多 1500 章，耗时可极长、费用高。若填写「预定总章数」大于本轮，将先跑宏观阶段表再写本轮分章要点，并写入
+                    plan.json。开笔前会自动写入记忆宫殿四类长程约束。
                   </p>
                 </div>
                 <div class="form-actions">
@@ -165,6 +178,7 @@
               <h3 class="sub-block-title">续写下一章</h3>
               <p class="rail-hint">
                 优先选择「书本」（新库）；仍支持旧版 <span class="inline-code">out/</span> 前缀书系。续写沿用上方题材与编排模式。
+                书本模式单次最多续写 500 章（逐章生成，耗时可很长）。
               </p>
               <div class="form-grid">
                 <div class="form-col-span2">
@@ -175,7 +189,7 @@
                 </div>
                 <div>
                   <label class="lbl" for="continue-chapter-count">续写章数（仅书本）</label>
-                  <input type="number" id="continue-chapter-count" class="inp" min="1" max="20" value="1" />
+                  <input type="number" id="continue-chapter-count" class="inp" min="1" max="500" value="1" />
                 </div>
                 <div class="form-actions">
                   <button type="button" class="btn btn-secondary" id="btn-refresh-series">刷新列表</button>

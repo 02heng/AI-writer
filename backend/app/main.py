@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .book_storage import (
     book_dir,
@@ -36,7 +36,9 @@ from .book_storage import (
 from .library_fs import list_out_markdown, list_series, safe_out_md_path, safe_series_prefix
 from .llm import chat_completion, stream_chat_completion
 from .pipeline import (
+    MAX_CONTINUE_CHAPTERS,
     MAX_PIPELINE_CHAPTERS,
+    MAX_PLANNED_TOTAL_CHAPTERS,
     run_continue_chapters,
     run_continue_next_chapter,
     run_continue_next_chapter_legacy_out,
@@ -180,6 +182,12 @@ class PipelineFromTitleBody(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     theme_id: Optional[str] = Field(default="general")
     max_chapters: int = Field(default=8, ge=3, le=MAX_PIPELINE_CHAPTERS)
+    planned_total_chapters: Optional[int] = Field(
+        default=None,
+        ge=3,
+        le=MAX_PLANNED_TOTAL_CHAPTERS,
+        description="全书预定总章数（可大于本轮 max_chapters）；不设则与本轮相同，不跑宏观阶段表",
+    )
     length_scale: str = Field(
         default="medium",
         description="short=短篇, medium=中篇, long=长篇",
@@ -198,6 +206,12 @@ class PipelineFromTitleBody(BaseModel):
     )
     run_reader_test: bool = Field(default=False, description="full 模式下是否追加盲测读者智能体")
 
+    @model_validator(mode="after")
+    def planned_total_ge_round(self) -> PipelineFromTitleBody:
+        if self.planned_total_chapters is not None and self.planned_total_chapters < self.max_chapters:
+            raise ValueError("planned_total_chapters 须大于或等于本轮 max_chapters")
+        return self
+
 
 class PipelineContinueBody(BaseModel):
     """在已有书本后续写下一章（优先 book_id；可回退旧 out/ 前缀）。"""
@@ -213,7 +227,7 @@ class PipelineContinueBody(BaseModel):
     chapter_count: int = Field(
         default=1,
         ge=1,
-        le=20,
+        le=MAX_CONTINUE_CHAPTERS,
         description="续写章数（仅 book_id 模式；旧 out/ 书系仍为 1 章）",
     )
 
@@ -266,7 +280,7 @@ def _compose_system(base_system: str, theme_id: Optional[str]) -> str:
 
 
 # 递增：Electron 启动时用于识别「本机 18765 上是否为当前应用的后端」，避免旧版/他进程占位导致 404。
-API_REVISION = 3
+API_REVISION = 4
 
 
 @app.get("/api/health")
@@ -276,6 +290,8 @@ def health():
         "ok": True,
         "api_revision": API_REVISION,
         "max_pipeline_chapters": MAX_PIPELINE_CHAPTERS,
+        "max_continue_chapters": MAX_CONTINUE_CHAPTERS,
+        "max_planned_total_chapters": MAX_PLANNED_TOTAL_CHAPTERS,
         "pipeline_stream": True,
         "user_data": str(ROOT),
         "books_root": str(books_root(ROOT)),
@@ -539,6 +555,7 @@ def pipeline_from_title(body: PipelineFromTitleBody):
             writing_temp=body.writing_temperature,
             agent_profile=ap,
             run_reader_test=bool(body.run_reader_test),
+            planned_total_chapters=body.planned_total_chapters,
         )
     except HTTPException:
         raise
@@ -593,6 +610,7 @@ async def pipeline_from_title_stream(body: PipelineFromTitleBody):
                     agent_profile=ap,
                     run_reader_test=bool(body.run_reader_test),
                     progress_cb=progress,
+                    planned_total_chapters=body.planned_total_chapters,
                 )
                 q.put(("done", r))
             except HTTPException as he:
@@ -650,7 +668,7 @@ def pipeline_continue(body: PipelineContinueBody):
     sp = (body.series_prefix or "").strip()
     try:
         if bid:
-            cnt = max(1, min(int(body.chapter_count or 1), 20))
+            cnt = max(1, min(int(body.chapter_count or 1), MAX_CONTINUE_CHAPTERS))
             if cnt > 1:
                 result = run_continue_chapters(
                     root=ROOT,

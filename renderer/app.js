@@ -1008,8 +1008,18 @@ document.addEventListener('DOMContentLoaded', async () => {
       void showAppAlert('请先填写题目 / 书名 / 灵感短语。', '缺少题目');
       return;
     }
+    const MAX_PIPELINE_RUN = 1500;
+    const MAX_PLANNED_TOTAL = 5000;
     const rawN = parseInt(String(document.getElementById('solo-chapters')?.value || '8'), 10);
-    const maxChapters = Number.isFinite(rawN) ? Math.min(500, Math.max(3, rawN)) : 8;
+    const maxChapters = Number.isFinite(rawN) ? Math.min(MAX_PIPELINE_RUN, Math.max(3, rawN)) : 8;
+    const rawPlanned = String(document.getElementById('solo-planned-total')?.value || '').trim();
+    let plannedTotalChapters;
+    if (rawPlanned !== '') {
+      const p = parseInt(rawPlanned, 10);
+      if (Number.isFinite(p)) {
+        plannedTotalChapters = Math.min(MAX_PLANNED_TOTAL, Math.max(3, p));
+      }
+    }
     const lengthScale = document.getElementById('solo-length')?.value || 'medium';
     const protagonistGender = document.getElementById('solo-gender')?.value || 'any';
     const btn = document.getElementById('btn-pipeline-full');
@@ -1019,6 +1029,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     const progBar = document.getElementById('pipeline-progress-bar');
     const progLabel = document.getElementById('pipeline-progress-label');
     const progEta = document.getElementById('pipeline-progress-eta');
+    if (plannedTotalChapters !== undefined && plannedTotalChapters < maxChapters) {
+      void showAppAlert('预定总章数须大于或等于本轮生成章数。', '参数无效');
+      return;
+    }
     if (btn) btn.disabled = true;
     if (prog) {
       prog.hidden = false;
@@ -1043,6 +1057,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       agent_profile: document.getElementById('pipeline-agent-profile')?.value || 'fast',
       run_reader_test: document.getElementById('pipeline-reader-test')?.checked ?? false
     };
+    if (plannedTotalChapters !== undefined) {
+      payload.planned_total_chapters = plannedTotalChapters;
+    }
     try {
       const base = await apiBase();
       const streamUrl = joinBackendUrl(base, '/api/pipeline/from-title/stream');
@@ -1164,8 +1181,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         agent_profile: document.getElementById('pipeline-agent-profile')?.value || 'fast',
         run_reader_test: document.getElementById('pipeline-reader-test')?.checked ?? false
       };
+      const MAX_CONTINUE_CHAPTERS = 500;
       const cc = parseInt(String(document.getElementById('continue-chapter-count')?.value || '1'), 10);
-      const chapterCount = Number.isFinite(cc) ? Math.min(20, Math.max(1, cc)) : 1;
+      const chapterCount = Number.isFinite(cc)
+        ? Math.min(MAX_CONTINUE_CHAPTERS, Math.max(1, cc))
+        : 1;
       let payload = { ...basePayload, chapter_count: chapterCount };
       if (raw.startsWith('book:')) {
         payload.book_id = raw.slice(5);

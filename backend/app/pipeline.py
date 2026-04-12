@@ -29,10 +29,124 @@ logger = get_logger(__name__)
 
 ProgressCb = Optional[Callable[[dict[str, Any]], None]]
 
-# 一键生成上限；超过 PLAN_SINGLE_SHOT_MAX 章时用分批策划，避免单次 JSON 过大导致模型截断或语法错误。
-MAX_PIPELINE_CHAPTERS = 500
+# 本轮一键生成上限；超过 PLAN_SINGLE_SHOT_MAX 章时用分批策划，避免单次 JSON 过大导致模型截断或语法错误。
+MAX_PIPELINE_CHAPTERS = 1500
+# 用户可声明的「全书预定总章数」上限（可大于本轮生成数，用于宏观阶段表）。
+MAX_PLANNED_TOTAL_CHAPTERS = 5000
+# 单次「续写」API 可连续生成的章数上限（逐章循环，与一键新书上限分开）。
+MAX_CONTINUE_CHAPTERS = 500
 PLAN_SINGLE_SHOT_MAX = 20
 PLAN_BATCH_SIZE = 20
+
+
+def _format_macro_block(macro: dict[str, Any], *, chapters_this_run: int) -> str:
+    """注入分章策划与正文：提醒总盘子与本批范围。"""
+    total = int(macro.get("planned_total_chapters") or 0)
+    lines = [
+        f"【全书预定总尺度】全书约 {total} 章（用户设定）。本轮只生成第 1–{chapters_this_run} 章要点与正文，"
+        "不得在本轮内写完全书终局；后段须留白。",
+        "【阶段路线图】",
+    ]
+    for p in macro.get("phases") or []:
+        if not isinstance(p, dict):
+            continue
+        name = str(p.get("phase_name") or "").strip() or "（未命名阶段）"
+        try:
+            a = int(p.get("chapter_from", 0))
+            b = int(p.get("chapter_to", 0))
+        except (TypeError, ValueError):
+            continue
+        summ = re.sub(r"\s+", " ", str(p.get("summary") or "").strip())[:220]
+        lines.append(f"- 第{a}–{b}章「{name}」：{summ}")
+    ed = re.sub(r"\s+", " ", str(macro.get("ending_direction") or "").strip())[:400]
+    if ed:
+        lines.append(f"【终点走向】{ed}")
+    return "\n".join(lines)
+
+
+def _macro_phase_note_for_chapter(idx: int, macro: dict[str, Any]) -> str:
+    """写作时提示本章在宏观阶段中的位置。"""
+    total = macro.get("planned_total_chapters", "?")
+    phases = macro.get("phases") if isinstance(macro.get("phases"), list) else []
+    for p in phases:
+        if not isinstance(p, dict):
+            continue
+        try:
+            a = int(p.get("chapter_from", 0))
+            b = int(p.get("chapter_to", 0))
+        except (TypeError, ValueError):
+            continue
+        if a <= idx <= b:
+            name = str(p.get("phase_name") or "").strip() or "本阶段"
+            summ = re.sub(r"\s+", " ", str(p.get("summary") or "").strip())[:280]
+            return (
+                f"【宏观位置】全书约 {total} 章；当前第 {idx} 章，处于阶段「{name}」（约第{a}–{b}章）。"
+                f"阶段要点：{summ}"
+            )
+    return f"【宏观位置】全书约 {total} 章；当前第 {idx} 章。请勿提前收官，保留后续卷宗空间。"
+
+
+def _plan_macro_scale(
+    *,
+    title: str,
+    theme_hint: str,
+    planned_total: int,
+    chapters_this_run: int,
+    length_scale: str,
+    protagonist_gender: str,
+    temperature: float,
+) -> tuple[str, str, dict[str, Any]]:
+    """两阶策划·宏观：全书总尺度 + 阶段路线图（不生成逐章 beat）。"""
+    sys_p = (
+        "你是超长篇小说总策划。只输出一个 JSON 对象，禁止 Markdown 围栏。"
+        '{"book_title":"string","premise":"string","phases":[{"phase_name":"string","chapter_from":1,"chapter_to":200,"summary":"string"},...],"ending_direction":"string"}'
+        f" premise 为全书梗概，约 400-1100 字，用分号连接短句，字符串内禁止换行与未转义英文双引号。"
+        f" phases 必须 6-16 项；chapter_from、chapter_to 为整数，阶段按章号递增，整体覆盖 1 至 {planned_total}（可略有重叠或衔接缝隙但不要大片遗漏）；"
+        f"每段 summary 80-220 字，写阶段目标与关键转折，禁止尾逗号。"
+        f" ending_direction 写终局气质与主线落点（勿剧透细节），80-200 字。"
+        f" 用户本轮只写第 1–{chapters_this_run} 章，前面若干阶段须为后文留白，禁止在首阶段内完结全书。"
+    )
+    user_p = (
+        f"题目：{title.strip()}\n"
+        f"全书预定总章数：{planned_total}（必须按此尺度设计阶段跨度）。\n"
+        f"本轮将实际生成正文：第 1–{chapters_this_run} 章。\n"
+        f"{_scale_instruction(length_scale)}\n{_protagonist_instruction(protagonist_gender)}\n"
+    )
+    if theme_hint:
+        user_p += f"题材说明：{theme_hint}\n"
+    data = _chat_plan_json(sys_p, user_p, temperature, attempts=3)
+    book_title = str(data.get("book_title") or "").strip() or title.strip()
+    premise = str(data.get("premise") or "").strip()
+    if len(premise) < 100:
+        raise ValueError("宏观策划梗概过短")
+    phases_raw = data.get("phases")
+    out_phases: list[dict[str, Any]] = []
+    if isinstance(phases_raw, list):
+        for p in phases_raw:
+            if not isinstance(p, dict):
+                continue
+            try:
+                a = int(p.get("chapter_from", 0))
+                b = int(p.get("chapter_to", 0))
+            except (TypeError, ValueError):
+                continue
+            if a < 1 or b < a:
+                continue
+            name = str(p.get("phase_name") or "").strip() or "阶段"
+            summ = re.sub(r"\s+", " ", str(p.get("summary") or "").strip())
+            if summ:
+                out_phases.append(
+                    {"phase_name": name, "chapter_from": a, "chapter_to": b, "summary": summ[:500]}
+                )
+    if len(out_phases) < 4:
+        raise ValueError("宏观策划有效阶段不足")
+    ending_direction = re.sub(r"\s+", " ", str(data.get("ending_direction") or "").strip())[:500]
+    macro: dict[str, Any] = {
+        "planned_total_chapters": planned_total,
+        "phases": out_phases,
+        "ending_direction": ending_direction,
+    }
+    return book_title, premise, macro
 
 
 def _chat_plan_json(system: str, user: str, temperature: float, *, attempts: int = 3) -> dict[str, Any]:
@@ -60,6 +174,54 @@ def _chat_plan_json(system: str, user: str, temperature: float, *, attempts: int
             continue
     assert last_err is not None
     raise last_err
+
+
+def _batched_chapter_plan_slices(
+    *,
+    title: str,
+    book_title: str,
+    premise: str,
+    theme_hint: str,
+    n: int,
+    length_scale: str,
+    protagonist_gender: str,
+    temperature: float,
+    macro_block: str = "",
+) -> list[dict[str, Any]]:
+    """从第 1 章起分批生成共 n 章的分章要点。"""
+    n = max(3, min(int(n), MAX_PIPELINE_CHAPTERS))
+    all_ch: list[dict[str, Any]] = []
+    start = 1
+    while start <= n:
+        end = min(start + PLAN_BATCH_SIZE - 1, n)
+        prev_tail = ""
+        if all_ch:
+            tail = all_ch[-2:] if len(all_ch) >= 2 else all_ch[-1:]
+            lines = [
+                f"第 {c['idx']} 章「{str(c.get('title', ''))[:40]}」：{str(c.get('beat', ''))[:120]}"
+                for c in tail
+            ]
+            prev_tail = "【上一批末章摘要（须衔接）】\n" + "\n".join(lines) + "\n"
+        batch = _plan_chapters_slice(
+            title=title,
+            book_title=book_title,
+            premise=premise,
+            theme_hint=theme_hint,
+            start_idx=start,
+            end_idx=end,
+            length_scale=length_scale,
+            protagonist_gender=protagonist_gender,
+            temperature=temperature,
+            prev_tail_hint=prev_tail,
+            macro_block=macro_block,
+        )
+        all_ch.extend(batch)
+        start = end + 1
+
+    if len(all_ch) != n:
+        raise ValueError(f"分批策划章数不足：需要 {n}，得到 {len(all_ch)}")
+    all_ch.sort(key=lambda x: int(x["idx"]))
+    return all_ch
 
 
 def _heading_titles_equal(line_title: str, want: str) -> bool:
@@ -358,6 +520,7 @@ def _plan_chapters_slice(
     protagonist_gender: str,
     temperature: float,
     prev_tail_hint: str,
+    macro_block: str = "",
 ) -> list[dict[str, Any]]:
     k = end_idx - start_idx + 1
     sys_p = (
@@ -372,6 +535,8 @@ def _plan_chapters_slice(
     )
     if theme_hint:
         user_p += f"题材说明：{theme_hint}\n"
+    if macro_block.strip():
+        user_p += macro_block.strip() + "\n"
     user_p += f"请给出第 {start_idx} 章至第 {end_idx} 章的写作要点（须与全书梗概及叙事节奏一致）。\n"
     if prev_tail_hint.strip():
         user_p += prev_tail_hint
@@ -431,36 +596,17 @@ def _plan_from_title_batched(
         protagonist_gender=protagonist_gender,
         temperature=temperature,
     )
-    all_ch: list[dict[str, Any]] = []
-    start = 1
-    while start <= n:
-        end = min(start + PLAN_BATCH_SIZE - 1, n)
-        prev_tail = ""
-        if all_ch:
-            tail = all_ch[-2:] if len(all_ch) >= 2 else all_ch[-1:]
-            lines = [
-                f"第 {c['idx']} 章「{str(c.get('title', ''))[:40]}」：{str(c.get('beat', ''))[:120]}"
-                for c in tail
-            ]
-            prev_tail = "【上一批末章摘要（须衔接）】\n" + "\n".join(lines) + "\n"
-        batch = _plan_chapters_slice(
-            title=title,
-            book_title=book_title,
-            premise=premise,
-            theme_hint=theme_hint,
-            start_idx=start,
-            end_idx=end,
-            length_scale=length_scale,
-            protagonist_gender=protagonist_gender,
-            temperature=temperature,
-            prev_tail_hint=prev_tail,
-        )
-        all_ch.extend(batch)
-        start = end + 1
-
-    if len(all_ch) != n:
-        raise ValueError(f"分批策划章数不足：需要 {n}，得到 {len(all_ch)}")
-    all_ch.sort(key=lambda x: int(x["idx"]))
+    all_ch = _batched_chapter_plan_slices(
+        title=title,
+        book_title=book_title,
+        premise=premise,
+        theme_hint=theme_hint,
+        n=n,
+        length_scale=length_scale,
+        protagonist_gender=protagonist_gender,
+        temperature=temperature,
+        macro_block="",
+    )
     return {"book_title": book_title, "premise": premise, "chapters": all_ch}
 
 
@@ -472,13 +618,67 @@ def _plan_from_title(
     length_scale: str,
     protagonist_gender: str,
     temperature: float,
+    planned_total_chapters: Optional[int] = None,
+    progress_cb: ProgressCb = None,
 ) -> dict[str, Any]:
-    n = max(3, min(int(chapter_count), MAX_PIPELINE_CHAPTERS))
-    if n <= PLAN_SINGLE_SHOT_MAX:
+    n_run = max(3, min(int(chapter_count), MAX_PIPELINE_CHAPTERS))
+    if planned_total_chapters is not None:
+        n_total = max(3, min(int(planned_total_chapters), MAX_PLANNED_TOTAL_CHAPTERS))
+        if n_total < n_run:
+            n_total = n_run
+    else:
+        n_total = n_run
+
+    if n_total > n_run:
+        if progress_cb:
+            progress_cb(
+                {
+                    "event": "phase",
+                    "phase": "macro_planning",
+                    "message": f"正在策划全书宏观结构（预定约 {n_total} 章，本轮生成 {n_run} 章）…",
+                }
+            )
+        book_title, premise, macro = _plan_macro_scale(
+            title=title,
+            theme_hint=theme_hint,
+            planned_total=n_total,
+            chapters_this_run=n_run,
+            length_scale=length_scale,
+            protagonist_gender=protagonist_gender,
+            temperature=temperature,
+        )
+        mb = _format_macro_block(macro, chapters_this_run=n_run)
+        if progress_cb:
+            progress_cb(
+                {
+                    "event": "phase",
+                    "phase": "micro_planning",
+                    "message": f"正在分批生成分章要点（第 1–{n_run} 章）…",
+                }
+            )
+        chapters = _batched_chapter_plan_slices(
+            title=title,
+            book_title=book_title,
+            premise=premise,
+            theme_hint=theme_hint,
+            n=n_run,
+            length_scale=length_scale,
+            protagonist_gender=protagonist_gender,
+            temperature=temperature,
+            macro_block=mb,
+        )
+        return {
+            "book_title": book_title,
+            "premise": premise,
+            "chapters": chapters,
+            "macro_outline": macro,
+        }
+
+    if n_run <= PLAN_SINGLE_SHOT_MAX:
         return _plan_from_title_single(
             title=title,
             theme_hint=theme_hint,
-            chapter_count=n,
+            chapter_count=n_run,
             length_scale=length_scale,
             protagonist_gender=protagonist_gender,
             temperature=temperature,
@@ -486,7 +686,7 @@ def _plan_from_title(
     return _plan_from_title_batched(
         title=title,
         theme_hint=theme_hint,
-        chapter_count=n,
+        chapter_count=n_run,
         length_scale=length_scale,
         protagonist_gender=protagonist_gender,
         temperature=temperature,
@@ -582,6 +782,7 @@ def _seed_series_canon_memory(
     chapters: list[dict[str, Any]],
     n_target: int,
     temperature: float,
+    macro_outline: Optional[dict[str, Any]] = None,
 ) -> None:
     """开笔前：世界观/人物/伏笔/时间线写入本书记忆宫殿与条目（与长期记忆约定一致）。"""
     compact = _compact_outline_for_canon(chapters, n_target)
@@ -596,12 +797,21 @@ def _seed_series_canon_memory(
         "timeline_irreversible：生死、叛变、大战结果、关键日期地点等不可逆事实，年表式短句。"
         "信息不足可写「待正文补充」；字符串内禁止未转义英文双引号；禁止尾逗号。"
     )
+    plan_note = f"计划总章数：{n_target}"
+    if isinstance(macro_outline, dict) and macro_outline.get("planned_total_chapters") is not None:
+        try:
+            pt = int(macro_outline["planned_total_chapters"])
+            plan_note = f"全书预定总章数：{pt}；本轮分章要点覆盖第 1–{n_target} 章"
+        except (TypeError, ValueError):
+            pass
     user_p = (
-        f"书名：{book_title}\n计划总章数：{n_target}\n【全书梗概】\n{premise}\n"
+        f"书名：{book_title}\n{plan_note}\n【全书梗概】\n{premise}\n"
         f"{_scale_instruction(length_scale)}\n{_protagonist_instruction(protagonist_gender)}\n"
     )
     if theme_hint:
         user_p += f"题材说明：{theme_hint}\n"
+    if isinstance(macro_outline, dict) and macro_outline:
+        user_p += _format_macro_block(macro_outline, chapters_this_run=n_target) + "\n"
     user_p += f"【分章缩略】\n{compact[:16000]}\n"
 
     data: dict[str, Any] | None = None
@@ -694,6 +904,7 @@ def run_pipeline_from_title(
     run_reader_test: bool = False,
     use_scene_generation: bool = False,
     progress_cb: ProgressCb = None,
+    planned_total_chapters: Optional[int] = None,
 ) -> dict[str, Any]:
     """策划 → 逐章写作 → 写入 books/{book_id}/。
     
@@ -710,6 +921,11 @@ def run_pipeline_from_title(
 
     try:
         n_ch = max(3, min(int(max_chapters), MAX_PIPELINE_CHAPTERS))
+        planned_opt: Optional[int] = None
+        if planned_total_chapters is not None:
+            planned_opt = max(3, min(int(planned_total_chapters), MAX_PLANNED_TOTAL_CHAPTERS))
+            if planned_opt < n_ch:
+                planned_opt = n_ch
         plan_raw = _plan_from_title(
             title=title,
             theme_hint=theme_hint,
@@ -717,6 +933,8 @@ def run_pipeline_from_title(
             length_scale=length_scale,
             protagonist_gender=protagonist_gender,
             temperature=planning_temp,
+            planned_total_chapters=planned_opt,
+            progress_cb=progress_cb,
         )
     except (json.JSONDecodeError, ValueError, TypeError) as e:
         raise HTTPException(status_code=502, detail=f"策划阶段失败（JSON）：{e}") from e
@@ -725,6 +943,9 @@ def run_pipeline_from_title(
 
     book_title = str(plan_raw.get("book_title") or title).strip() or title
     premise = str(plan_raw.get("premise") or "").strip()
+    macro_for_writing = plan_raw.get("macro_outline")
+    if not isinstance(macro_for_writing, dict):
+        macro_for_writing = None
     chapters_raw = plan_raw.get("chapters")
     if not isinstance(chapters_raw, list):
         raise HTTPException(502, "策划结果 chapters 格式错误")
@@ -757,14 +978,20 @@ def run_pipeline_from_title(
             f"策划仅返回 {len(chapters)} 章有效要点，少于要求的 {n_target} 章，请重试或略减章数。",
         )
 
+    planned_stored = planned_opt if planned_opt is not None else n_target
+    meta_plan: dict[str, Any] = {
+        "length_scale": length_scale,
+        "protagonist_gender": protagonist_gender,
+        "chapter_count": n_target,
+        "chapters_this_run": n_target,
+        "planned_total_chapters": planned_stored,
+    }
+    if macro_for_writing:
+        meta_plan["macro_outline"] = macro_for_writing
     plan_payload = {
         "book_title": book_title,
         "premise": premise,
-        "meta": {
-            "length_scale": length_scale,
-            "protagonist_gender": protagonist_gender,
-            "chapter_count": n_target,
-        },
+        "meta": meta_plan,
         "chapters": chapters,
     }
 
@@ -797,6 +1024,7 @@ def run_pipeline_from_title(
             chapters=chapters,
             n_target=n_target,
             temperature=planning_temp,
+            macro_outline=macro_for_writing,
         )
 
     plan_ms = int((time.perf_counter() - t0) * 1000)
@@ -851,6 +1079,8 @@ def run_pipeline_from_title(
                 mem_parts.append(mem_book.strip())
             if memory_context_global.strip():
                 mem_parts.append("【全局记忆宫殿（跨书）】\n" + memory_context_global.strip())
+        if macro_for_writing:
+            mem_parts.append(_macro_phase_note_for_chapter(idx, macro_for_writing))
         mem_parts.append(
             f"【书名】{book_title}\n【全书梗概】\n{premise}\n"
             f"【已生成前文摘要】\n{running_summary or '（这是第一章，无前文。）'}\n"
@@ -1117,7 +1347,7 @@ def run_continue_chapters(
     progress_cb: ProgressCb = None,
 ) -> dict[str, Any]:
     """续写多章：逐章调用 run_continue_next_chapter。"""
-    n = max(1, min(int(count), 20))
+    n = max(1, min(int(count), MAX_CONTINUE_CHAPTERS))
     results: list[dict[str, Any]] = []
     last: dict[str, Any] = {}
     for i in range(n):
