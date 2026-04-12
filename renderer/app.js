@@ -476,6 +476,20 @@ async function openLegacyLibraryFile(name) {
   metaEl.textContent = '加载中…';
   contentEl.innerHTML = '';
   try {
+    // #region agent log
+    fetch('http://127.0.0.1:7358/ingest/ec74e965-0955-4757-aff0-bed113fed1c4', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd7648d' },
+      body: JSON.stringify({
+        sessionId: 'd7648d',
+        hypothesisId: 'H5',
+        location: 'app.js:openLegacyLibraryFile',
+        message: 'library read',
+        data: { name },
+        timestamp: Date.now()
+      })
+    }).catch(() => {});
+    // #endregion
     const data = await fetchJson(`/api/library/read?name=${encodeURIComponent(name)}`);
     metaEl.textContent = `${data.content.length} 字`;
     renderReaderMarkdown(data.content);
@@ -947,12 +961,30 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   document.getElementById('btn-pick-books-dir')?.addEventListener('click', async () => {
-    if (!window.aiWriter?.pickBooksDir) return;
+    // #region agent log
+    fetch('http://127.0.0.1:7358/ingest/ec74e965-0955-4757-aff0-bed113fed1c4', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd7648d' },
+      body: JSON.stringify({
+        sessionId: 'd7648d',
+        hypothesisId: 'H2',
+        location: 'app.js:btn-pick-books-dir',
+        message: 'click',
+        data: { hasPick: Boolean(window.aiWriter?.pickBooksDir) },
+        timestamp: Date.now()
+      })
+    }).catch(() => {});
+    // #endregion
+    if (!window.aiWriter?.pickBooksDir) {
+      void showAppAlert('当前页面未接入 Electron（或 preload 未加载），无法打开系统文件夹选择框。请用桌面版 AI Writer 启动。', '无法浏览文件夹');
+      return;
+    }
     try {
       const p = await window.aiWriter.pickBooksDir();
       if (p) document.getElementById('books-root-path').value = p;
     } catch (e) {
       console.error(e);
+      void showAppAlert(e?.message || String(e), '选择文件夹失败');
     }
   });
 
@@ -1195,6 +1227,20 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('reader-export-txt')?.addEventListener('click', async () => {
     if (!readerBookId) return;
+    // #region agent log
+    fetch('http://127.0.0.1:7358/ingest/ec74e965-0955-4757-aff0-bed113fed1c4', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd7648d' },
+      body: JSON.stringify({
+        sessionId: 'd7648d',
+        hypothesisId: 'H4',
+        location: 'app.js:export-txt',
+        message: 'click',
+        data: { readerBookId },
+        timestamp: Date.now()
+      })
+    }).catch(() => {});
+    // #endregion
     try {
       const base = await apiBase();
       const url = joinBackendUrl(
@@ -1203,10 +1249,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       );
       const res = await fetch(url);
       if (!res.ok) throw new Error(await res.text());
-      const blob = await res.blob();
-      const u = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = u;
+      const text = await res.text();
       const cd = res.headers.get('Content-Disposition');
       const m =
         cd &&
@@ -1219,6 +1262,19 @@ document.addEventListener('DOMContentLoaded', async () => {
           fname = m[1] || m[2] || fname;
         }
       }
+      if (window.aiWriter?.saveTextFileAs) {
+        const out = await window.aiWriter.saveTextFileAs({
+          defaultFileName: fname,
+          content: text
+        });
+        if (out?.canceled) return;
+        if (!out?.ok) throw new Error(out?.error || '保存失败');
+        return;
+      }
+      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      const u = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = u;
       a.download = fname;
       a.rel = 'noopener';
       document.body.appendChild(a);

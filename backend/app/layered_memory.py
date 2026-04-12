@@ -4,9 +4,9 @@ This module implements a three-tier memory system inspired by modern AI agent
 architectures, designed to maintain consistency in long novel generation.
 
 Memory Tiers:
-    1. Long-term Memory (LTM): Persistent world rules, character profiles
-    2. Episodic Memory (EM): Events, plot points, foreshadowing
-    3. Working Memory (WM): Recent chapters, immediate context
+    1. Long-term Memory (LTM): 世界观硬规则、人物锚点、开放伏笔、不可逆事实（总摘要 + kb 呼应）
+    2. Episodic Memory (EM): 情节推进、事件与伏笔状态变化
+    3. Working Memory (WM): 近期章节与当下场景上下文
 
 Usage:
     from app.layered_memory import (
@@ -40,9 +40,9 @@ logger = get_logger(__name__)
 
 class MemoryTier(Enum):
     """Memory tier levels."""
-    LONG_TERM = "long_term"      # World rules, character profiles
-    EPISODIC = "episodic"        # Events, plot points
-    WORKING = "working"          # Recent context
+    LONG_TERM = "long_term"      # 硬规则、人物锚点、伏笔、不可逆事实
+    EPISODIC = "episodic"        # 情节推进、事件与伏笔状态
+    WORKING = "working"          # 近期章节与当下场景
 
 
 # =============================================================================

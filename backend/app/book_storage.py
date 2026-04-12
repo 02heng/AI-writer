@@ -88,17 +88,6 @@ def create_book(
         encoding="utf-8",
     )
     init_memory_db(root)
-    rollup = root / "memory" / "palace_summary.md"
-    if rollup.exists():
-        try:
-            cur = rollup.read_text(encoding="utf-8")
-            if "本书记忆宫殿" not in cur:
-                rollup.write_text(
-                    "（本书记忆宫殿 · 总摘要）\n\n随章节生成同步更新；可在写作台选择本书后编辑。\n\n" + cur,
-                    encoding="utf-8",
-                )
-        except OSError:
-            pass
 
     idx = _load_index(data_root)
     ch_count = len(plan.get("chapters") or []) if isinstance(plan.get("chapters"), list) else 0

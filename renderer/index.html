@@ -258,7 +258,8 @@
                 <p class="surface-lead">
                   思路参考
                   <a href="https://github.com/milla-jovovich/mempalace" class="inline-link" target="_blank" rel="noopener noreferrer">MemPalace</a>
-                  ：总摘要 + 分条事实。可选「全局」或「指定书本」（与生成同步写入本书 <code class="inline-code">books/…/memory/</code>）。
+                  ：总摘要 + 分条事实。长期记忆宜记易写错的设定与伏笔；气氛与长描写交给正文与 kb。可选「全局」或「指定书本」（与生成同步写入本书
+                  <code class="inline-code">books/…/memory/</code>）。
                 </p>
               </div>
 
@@ -268,7 +269,7 @@
               </select>
 
               <label class="lbl" for="memory-rollup">总摘要（衣柜层）</label>
-              <textarea id="memory-rollup" class="inp inp-area" rows="5" placeholder="主线、人物状态、伏笔与时间线…"></textarea>
+              <textarea id="memory-rollup" class="inp inp-area" rows="5" placeholder="全书压缩：硬规则、人物锚点、开放伏笔、时间线；详见默认模板说明。"></textarea>
               <button type="button" class="btn btn-secondary" id="btn-save-rollup">保存总摘要</button>
 
               <h3 class="sub-block-title">新增条目（抽屉层）</h3>
@@ -292,7 +293,7 @@
               <label class="lbl" for="mem-title">标题</label>
               <input type="text" id="mem-title" class="inp" placeholder="简短标题" />
               <label class="lbl" for="mem-body">内容</label>
-              <textarea id="mem-body" class="inp inp-area" rows="3" placeholder="需要记住的设定或剧情事实…"></textarea>
+              <textarea id="mem-body" class="inp inp-area" rows="3" placeholder="单条事实/伏笔/人物要点（短句）；长设定请放 kb 或只写指针。"></textarea>
               <div class="form-actions">
                 <button type="button" class="btn btn-primary" id="btn-mem-add">添加条目</button>
                 <button type="button" class="btn btn-secondary" id="btn-mem-extract">从本章萃取（API）</button>

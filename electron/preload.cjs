@@ -10,5 +10,6 @@ contextBridge.exposeInMainWorld('aiWriter', {
   loadSettings: () => ipcRenderer.invoke('aiwriter:load-settings'),
   saveSettings: (data) => ipcRenderer.invoke('aiwriter:save-settings', data),
   restartBackend: () => ipcRenderer.invoke('aiwriter:restart-backend'),
-  pickBooksDir: () => ipcRenderer.invoke('aiwriter:pick-books-dir')
+  pickBooksDir: () => ipcRenderer.invoke('aiwriter:pick-books-dir'),
+  saveTextFileAs: (opts) => ipcRenderer.invoke('aiwriter:save-text-file', opts)
 });

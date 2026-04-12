@@ -127,6 +127,7 @@ function startBackend({ userDataPath, projectRoot }) {
     const env = {
       ...process.env,
       AIWRITER_USER_DATA: userDataPath,
+      AIWRITER_PROJECT_ROOT: projectRoot,
       DEEPSEEK_API_KEY: apiKey,
       DEEPSEEK_MODEL: model,
       PYTHONUTF8: '1',

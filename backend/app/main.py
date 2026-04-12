@@ -5,9 +5,11 @@ import json
 import os
 import re
 import threading
+import time
 from pathlib import Path
 from queue import Queue
 from typing import Optional
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -65,6 +67,13 @@ from .paths import ensure_layout, user_data_root
 PACKAGE_DIR = Path(__file__).resolve().parent
 THEMES = load_themes(PACKAGE_DIR)
 
+MEMORY_EXTRACT_SYSTEM_PROMPT = (
+    "你是小说编辑。请阅读用户给出的章节正文，提取可供后续章节参考的长期记忆要点。"
+    "优先：世界观中新增或强化的硬规则；人物关系或状态变化；新出现或推进的伏笔；不可逆事件与时间线节点。"
+    "避免：气氛渲染、具体对白、大段描写复述、照抄原文。"
+    "输出 5～12 条短句，每条一行，以「- 」开头，写成可检索的事实笔记。"
+)
+
 # 允许从 userData 加载 .env（可选）
 _ud = os.environ.get("AIWRITER_USER_DATA", "").strip()
 if _ud:
@@ -74,6 +83,50 @@ load_dotenv()
 ROOT = user_data_root()
 ensure_layout(ROOT)
 init_db(ROOT)
+
+
+# #region agent log
+def _agent_debug(payload: dict) -> None:
+    row = {
+        **payload,
+        "sessionId": "d7648d",
+        "timestamp": int(time.time() * 1000),
+    }
+    line = json.dumps(row, ensure_ascii=False) + "\n"
+    paths: list[Path] = []
+    ud = os.environ.get("AIWRITER_USER_DATA", "").strip()
+    if ud:
+        paths.append(Path(ud) / "debug-d7648d.log")
+    pr = os.environ.get("AIWRITER_PROJECT_ROOT", "").strip()
+    if pr:
+        paths.append(Path(pr) / "debug-d7648d.log")
+    if not paths:
+        paths.append(Path(__file__).resolve().parent.parent.parent / "debug-d7648d.log")
+    for log_p in paths:
+        try:
+            log_p.parent.mkdir(parents=True, exist_ok=True)
+            with log_p.open("a", encoding="utf-8") as f:
+                f.write(line)
+        except OSError:
+            pass
+
+
+# #endregion
+
+
+def _txt_attachment_disposition(*, book_id: str, title: str) -> str:
+    """HTTP 头 filename= 仅允许 latin-1；中文书名需配合 RFC 5987 filename*。"""
+    stem = re.sub(r'[<>:"/\\|?*\n\r]+', "", str(title or book_id))[:80] or "novel"
+    stem = stem.strip() or book_id
+    ascii_stem = re.sub(r"[^\x20-\x7E]+", "_", stem).strip("._") or re.sub(
+        r"[^a-f0-9]+", "", book_id.lower()
+    )[:16] or "novel"
+    utf8_name = f"{stem}.txt"
+    return (
+        f'attachment; filename="{ascii_stem}.txt"; '
+        f"filename*=UTF-8''{quote(utf8_name, safe='')}"
+    )
+
 
 app = FastAPI(title="AI Writer API", version="0.1.0")
 
@@ -260,8 +313,28 @@ def library_files():
 
 @app.get("/api/library/read")
 def library_read(name: str):
-    p = safe_out_md_path(ROOT, name)
-    return {"name": p.name, "content": _read_text(p)}
+    _agent_debug(
+        {
+            "hypothesisId": "H5",
+            "location": "main.py:library_read:entry",
+            "message": "library_read",
+            "data": {"name": name, "root": str(ROOT)},
+        }
+    )
+    try:
+        p = safe_out_md_path(ROOT, name)
+        content = _read_text(p)
+        return {"name": p.name, "content": content}
+    except Exception as e:
+        _agent_debug(
+            {
+                "hypothesisId": "H5",
+                "location": "main.py:library_read:err",
+                "message": str(e),
+                "data": {"type": type(e).__name__, "name": name},
+            }
+        )
+        raise
 
 
 @app.get("/api/library/series")
@@ -307,14 +380,39 @@ def api_book_chapter_read(book_id: str, chapter_n: int):
 
 @app.get("/api/books/{book_id}/export.txt")
 def api_book_export_txt(book_id: str):
-    text = export_book_plain_text(ROOT, book_id)
-    meta = get_meta(ROOT, book_id)
-    safe = re.sub(r'[<>:"/\\|?*]+', "", str(meta.get("title") or book_id))[:80] or "novel"
-    return PlainTextResponse(
-        text,
-        media_type="text/plain; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{safe}.txt"'},
+    _agent_debug(
+        {
+            "hypothesisId": "H3",
+            "location": "main.py:export_txt:entry",
+            "message": "export start",
+            "data": {
+                "book_id": book_id,
+                "books_root": str(books_root(ROOT)),
+                "root": str(ROOT),
+            },
+        }
     )
+    try:
+        text = export_book_plain_text(ROOT, book_id)
+        meta = get_meta(ROOT, book_id)
+        cd = _txt_attachment_disposition(
+            book_id=book_id, title=str(meta.get("title") or book_id)
+        )
+        return PlainTextResponse(
+            text,
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": cd},
+        )
+    except Exception as e:
+        _agent_debug(
+            {
+                "hypothesisId": "H3",
+                "location": "main.py:export_txt:err",
+                "message": str(e),
+                "data": {"type": type(e).__name__, "book_id": book_id},
+            }
+        )
+        raise
 
 
 @app.delete("/api/books/{book_id}")
@@ -381,14 +479,9 @@ def api_book_memory_entries_delete(book_id: str, entry_id: int):
 @app.post("/api/books/{book_id}/memory/extract")
 def api_book_memory_extract(book_id: str, body: ExtractMemoryBody):
     root = book_dir(ROOT, book_id)
-    sys_p = (
-        "你是小说编辑。请阅读用户给出的章节正文，提取可供后续章节参考的长期记忆要点。"
-        "输出 5～12 条短句，每条一行，以「- 」开头；只写剧情/人物状态/伏笔/时间线，不要评论文笔。"
-        "不要重复原文句子。"
-    )
     try:
         bullets = chat_completion(
-            system=sys_p,
+            system=MEMORY_EXTRACT_SYSTEM_PROMPT,
             user=body.text[:12000],
             temperature=body.temperature,
         )
@@ -642,14 +735,9 @@ def memory_rollup_put(body: RollupUpdate):
 @app.post("/api/memory/extract")
 def memory_extract(body: ExtractMemoryBody):
     """用模型从章节正文萃取要点，写入「情节」房间（会消耗 API）。"""
-    sys_p = (
-        "你是小说编辑。请阅读用户给出的章节正文，提取可供后续章节参考的长期记忆要点。"
-        "输出 5～12 条短句，每条一行，以「- 」开头；只写剧情/人物状态/伏笔/时间线，不要评论文笔。"
-        "不要重复原文句子。"
-    )
     try:
         bullets = chat_completion(
-            system=sys_p,
+            system=MEMORY_EXTRACT_SYSTEM_PROMPT,
             user=body.text[:12000],
             temperature=body.temperature,
         )
