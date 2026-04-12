@@ -1,27 +1,39 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
+import re
+import threading
 from pathlib import Path
+from queue import Queue
 from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .book_storage import (
     book_dir,
+    books_root,
+    export_book_plain_text,
     get_meta,
     get_toc,
     list_books,
+    list_trashed_books,
+    move_book_to_trash,
+    purge_book_from_trash,
     read_chapter,
     read_memory_summary,
+    restore_book_from_trash,
     write_memory_summary,
 )
 from .library_fs import list_out_markdown, list_series, safe_out_md_path, safe_series_prefix
 from .llm import chat_completion, stream_chat_completion
 from .pipeline import (
+    run_continue_chapters,
     run_continue_next_chapter,
     run_continue_next_chapter_legacy_out,
     run_pipeline_from_title,
@@ -143,6 +155,20 @@ class PipelineContinueBody(BaseModel):
     writing_temperature: float = Field(default=0.82, ge=0, le=2)
     agent_profile: str = Field(default="fast")
     run_reader_test: bool = Field(default=False)
+    chapter_count: int = Field(
+        default=1,
+        ge=1,
+        le=20,
+        description="续写章数（仅 book_id 模式；旧 out/ 书系仍为 1 章）",
+    )
+
+
+class TrashRestoreBody(BaseModel):
+    folder: str = Field(..., min_length=4, max_length=64, description="回收站目录名，通常与书本 ID 相同")
+
+
+class TrashPurgeBody(BaseModel):
+    folder: str = Field(..., min_length=4, max_length=64)
 
 
 def _read_text(rel: Path) -> str:
@@ -190,6 +216,8 @@ def health():
     return {
         "ok": True,
         "user_data": str(ROOT),
+        "books_root": str(books_root(ROOT)),
+        "books_root_env": bool(os.environ.get("AIWRITER_BOOKS_ROOT", "").strip()),
         "deepseek_configured": has_key,
     }
 
@@ -254,8 +282,41 @@ def api_book_toc(book_id: str):
 
 @app.get("/api/books/{book_id}/chapters/{chapter_n}")
 def api_book_chapter_read(book_id: str, chapter_n: int):
-    fn, content = read_chapter(ROOT, book_id, chapter_n)
-    return {"file": fn, "chapter": chapter_n, "content": content}
+    fn, content, title = read_chapter(ROOT, book_id, chapter_n)
+    return {"file": fn, "chapter": chapter_n, "title": title, "content": content}
+
+
+@app.get("/api/books/{book_id}/export.txt")
+def api_book_export_txt(book_id: str):
+    text = export_book_plain_text(ROOT, book_id)
+    meta = get_meta(ROOT, book_id)
+    safe = re.sub(r'[<>:"/\\|?*]+', "", str(meta.get("title") or book_id))[:80] or "novel"
+    return PlainTextResponse(
+        text,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{safe}.txt"'},
+    )
+
+
+@app.delete("/api/books/{book_id}")
+def api_book_move_to_trash(book_id: str):
+    return move_book_to_trash(ROOT, book_id)
+
+
+@app.get("/api/trash/books")
+def api_trash_books_list():
+    return {"items": list_trashed_books(ROOT)}
+
+
+@app.post("/api/trash/books/restore")
+def api_trash_books_restore(body: TrashRestoreBody):
+    return restore_book_from_trash(ROOT, body.folder)
+
+
+@app.post("/api/trash/books/purge")
+def api_trash_books_purge(body: TrashPurgeBody):
+    purge_book_from_trash(ROOT, body.folder)
+    return {"ok": True}
 
 
 @app.get("/api/books/{book_id}/memory/summary")
@@ -372,6 +433,90 @@ def pipeline_from_title(body: PipelineFromTitleBody):
     return result
 
 
+@app.post("/api/pipeline/from-title/stream")
+async def pipeline_from_title_stream(body: PipelineFromTitleBody):
+    writer_path = ROOT / "prompts" / "writer.md"
+    writer_system = _read_text(writer_path)
+    if not writer_system.strip():
+        raise HTTPException(400, "缺少或空的 prompts/writer.md")
+    th = theme_by_id(THEMES, body.theme_id or "general")
+    theme_addon = str((th or {}).get("system_addon") or "")
+    kb_block = _kb_context_only(body.kb_names)
+    mem_global = ""
+    if body.use_long_memory:
+        mem_global = build_memory_context(ROOT, max_chars=2800)
+    ap = (body.agent_profile or "fast").strip().lower()
+    if ap not in ("fast", "full"):
+        ap = "fast"
+    ls = body.length_scale.strip().lower()
+    if ls not in ("short", "medium", "long"):
+        ls = "medium"
+    pg = body.protagonist_gender.strip().lower()
+    if pg not in ("male", "female", "any"):
+        pg = "any"
+
+    async def gen():
+        q: Queue = Queue()
+
+        def progress(ev: dict) -> None:
+            q.put(("ev", ev))
+
+        def run() -> None:
+            try:
+                r = run_pipeline_from_title(
+                    root=ROOT,
+                    title=body.title.strip(),
+                    theme_addon=theme_addon,
+                    writer_system=writer_system,
+                    max_chapters=body.max_chapters,
+                    length_scale=ls,
+                    protagonist_gender=pg,
+                    use_long_memory=body.use_long_memory,
+                    memory_context_global=mem_global,
+                    kb_block=kb_block,
+                    planning_temp=body.planning_temperature,
+                    writing_temp=body.writing_temperature,
+                    agent_profile=ap,
+                    run_reader_test=bool(body.run_reader_test),
+                    progress_cb=progress,
+                )
+                q.put(("done", r))
+            except HTTPException as he:
+                q.put(("http_err", he))
+            except RuntimeError as e:
+                q.put(("err", str(e)))
+            except Exception as e:
+                q.put(("err", str(e)))
+
+        th_run = threading.Thread(target=run, daemon=True)
+        th_run.start()
+        while True:
+            kind, payload = await asyncio.to_thread(q.get)
+            if kind == "ev":
+                yield json.dumps(payload, ensure_ascii=False) + "\n"
+            elif kind == "done":
+                yield json.dumps({"event": "done", "result": payload}, ensure_ascii=False) + "\n"
+                break
+            elif kind == "http_err":
+                he = payload
+                d = he.detail
+                yield json.dumps(
+                    {
+                        "event": "error",
+                        "status": he.status_code,
+                        "detail": d if isinstance(d, str) else str(d),
+                    },
+                    ensure_ascii=False,
+                ) + "\n"
+                break
+            elif kind == "err":
+                yield json.dumps({"event": "error", "status": 502, "detail": payload}, ensure_ascii=False) + "\n"
+                break
+        th_run.join(timeout=2.0)
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson; charset=utf-8")
+
+
 @app.post("/api/pipeline/continue")
 def pipeline_continue(body: PipelineContinueBody):
     writer_path = ROOT / "prompts" / "writer.md"
@@ -391,18 +536,34 @@ def pipeline_continue(body: PipelineContinueBody):
     sp = (body.series_prefix or "").strip()
     try:
         if bid:
-            result = run_continue_next_chapter(
-                root=ROOT,
-                book_id=bid,
-                theme_addon=theme_addon,
-                writer_system=writer_system,
-                use_long_memory=body.use_long_memory,
-                memory_context_global=mem_global,
-                kb_block=kb_block,
-                writing_temp=body.writing_temperature,
-                agent_profile=ap,
-                run_reader_test=bool(body.run_reader_test),
-            )
+            cnt = max(1, min(int(body.chapter_count or 1), 20))
+            if cnt > 1:
+                result = run_continue_chapters(
+                    root=ROOT,
+                    book_id=bid,
+                    count=cnt,
+                    theme_addon=theme_addon,
+                    writer_system=writer_system,
+                    use_long_memory=body.use_long_memory,
+                    memory_context_global=mem_global,
+                    kb_block=kb_block,
+                    writing_temp=body.writing_temperature,
+                    agent_profile=ap,
+                    run_reader_test=bool(body.run_reader_test),
+                )
+            else:
+                result = run_continue_next_chapter(
+                    root=ROOT,
+                    book_id=bid,
+                    theme_addon=theme_addon,
+                    writer_system=writer_system,
+                    use_long_memory=body.use_long_memory,
+                    memory_context_global=mem_global,
+                    kb_block=kb_block,
+                    writing_temp=body.writing_temperature,
+                    agent_profile=ap,
+                    run_reader_test=bool(body.run_reader_test),
+                )
         elif sp:
             prefix = safe_series_prefix(sp)
             result = run_continue_next_chapter_legacy_out(

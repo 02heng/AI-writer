@@ -104,6 +104,25 @@ function updateReaderNav() {
   const maxN = nums.length ? nums[nums.length - 1] : 0;
   if (prev) prev.disabled = !hasCh || readerChapterN <= minN;
   if (next) next.disabled = !hasCh || readerChapterN >= maxN;
+  const exp = document.getElementById('reader-export-txt');
+  const del = document.getElementById('reader-delete-book');
+  const showActs = Boolean(readerBookId) && readerToc.length > 0;
+  if (exp) exp.hidden = !showActs;
+  if (del) del.hidden = !showActs;
+}
+
+function scrollReaderToTop() {
+  const el = document.getElementById('reader-content');
+  if (el) el.scrollTop = 0;
+}
+
+function formatEta(ms) {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return '';
+  const s = Math.ceil(ms / 1000);
+  if (s < 60) return `约 ${s} 秒`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `约 ${m} 分 ${r} 秒`;
 }
 
 async function openBookChapter(bookId, chapterN) {
@@ -120,9 +139,12 @@ async function openBookChapter(bookId, chapterN) {
   if (hintEl) hintEl.textContent = `书本 ID：${bookId}`;
   try {
     const data = await fetchJson(`/api/books/${encodeURIComponent(bookId)}/chapters/${chapterN}`);
+    const sub = (data.title && String(data.title).trim()) || '';
+    titleEl.textContent = sub ? `第 ${chapterN} 章 · ${sub}` : `第 ${chapterN} 章`;
     metaEl.textContent = `${data.content.length} 字`;
     renderReaderMarkdown(data.content);
     updateReaderNav();
+    scrollReaderToTop();
   } catch (e) {
     metaEl.textContent = '';
     titleEl.textContent = '读取失败';
@@ -155,7 +177,8 @@ async function selectReaderBook(bookId, titleLabel) {
       btn.type = 'button';
       btn.className = 'library-item library-item--chapter';
       btn.dataset.chapter = String(row.n);
-      btn.textContent = `第 ${row.n} 章`;
+      const t = row.title ? String(row.title) : '';
+      btn.textContent = t ? `第 ${row.n} 章 · ${t}` : `第 ${row.n} 章`;
       btn.addEventListener('click', () => openBookChapter(bookId, row.n));
       chBox.appendChild(btn);
     }
@@ -227,6 +250,10 @@ async function openLegacyLibraryFile(name) {
   readerChapterN = 0;
   readerToc = [];
   document.getElementById('reader-chapter-nav').hidden = true;
+  const exp = document.getElementById('reader-export-txt');
+  const del = document.getElementById('reader-delete-book');
+  if (exp) exp.hidden = true;
+  if (del) del.hidden = true;
   document.querySelectorAll('#legacy-file-list .library-item').forEach((el) => {
     el.classList.toggle('library-item--active', el.dataset.name === name);
   });
@@ -244,8 +271,74 @@ async function openLegacyLibraryFile(name) {
   }
 }
 
+async function refreshTrashList() {
+  const box = document.getElementById('trash-list');
+  if (!box) return;
+  box.innerHTML = '加载中…';
+  try {
+    const { items } = await fetchJson('/api/trash/books');
+    if (!items?.length) {
+      box.innerHTML = '<p class="rail-hint">回收站为空。</p>';
+      return;
+    }
+    box.innerHTML = '';
+    for (const it of items) {
+      const wrap = document.createElement('div');
+      wrap.className = 'trash-item';
+      const label = document.createElement('div');
+      label.className = 'rail-hint';
+      label.style.marginBottom = '0.35rem';
+      label.textContent = `${it.title || it.id} · ${it.folder || it.id}`;
+      const row = document.createElement('div');
+      row.style.display = 'flex';
+      row.style.flexWrap = 'wrap';
+      row.style.gap = '0.35rem';
+      const br = document.createElement('button');
+      br.type = 'button';
+      br.className = 'btn btn-secondary';
+      br.textContent = '还原';
+      br.addEventListener('click', async () => {
+        if (!window.confirm('还原此书到书库？')) return;
+        try {
+          await fetchJson('/api/trash/books/restore', {
+            method: 'POST',
+            body: JSON.stringify({ folder: it.folder || it.id })
+          });
+          await refreshReaderShell();
+        } catch (e) {
+          window.alert(e.message || String(e));
+        }
+      });
+      const bp = document.createElement('button');
+      bp.type = 'button';
+      bp.className = 'btn btn-ghost reader-danger';
+      bp.textContent = '永久删除';
+      bp.addEventListener('click', async () => {
+        if (!window.confirm('永久删除？不可恢复。')) return;
+        try {
+          await fetchJson('/api/trash/books/purge', {
+            method: 'POST',
+            body: JSON.stringify({ folder: it.folder || it.id })
+          });
+          await refreshTrashList();
+        } catch (e) {
+          window.alert(e.message || String(e));
+        }
+      });
+      row.appendChild(br);
+      row.appendChild(bp);
+      wrap.appendChild(label);
+      wrap.appendChild(row);
+      box.appendChild(wrap);
+    }
+  } catch (e) {
+    box.innerHTML = `<p class="rail-hint">${escapeHtml(e.message)}</p>`;
+  }
+}
+
 async function refreshReaderShell() {
   await refreshReaderBooks();
+  await refreshTrashList();
   await refreshMemBookOptions();
   await refreshLegacyFileList();
 }
@@ -344,6 +437,12 @@ async function refreshHealth() {
     const ds = h.deepseek_configured ? '已配置 Key' : '未配置 Key';
     el.textContent = `后端正常 · ${ds}`;
     el.className = 'status-pill is-ok';
+    const pathsEl = document.getElementById('paths-display');
+    if (pathsEl && h.books_root) {
+      const base = (pathsEl.dataset.basePaths || pathsEl.textContent || '').split('\n\n书本目录')[0].trim();
+      pathsEl.dataset.basePaths = base;
+      pathsEl.textContent = `${base}\n\n书本目录：\n${h.books_root}`;
+    }
     return h;
   } catch (e) {
     el.textContent = `后端不可用 · ${e.message}`;
@@ -553,7 +652,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     const s = await window.aiWriter.loadSettings();
     document.getElementById('api-key').value = s.deepseekApiKey || '';
     document.getElementById('model-id').value = s.deepseekModel || 'deepseek-chat';
+    const br = document.getElementById('books-root-path');
+    if (br) br.value = s.booksRoot || '';
   }
+
+  document.getElementById('btn-pick-books-dir')?.addEventListener('click', async () => {
+    if (!window.aiWriter?.pickBooksDir) return;
+    try {
+      const p = await window.aiWriter.pickBooksDir();
+      if (p) document.getElementById('books-root-path').value = p;
+    } catch (e) {
+      console.error(e);
+    }
+  });
 
   await refreshHealth();
   await refreshKbList();
@@ -582,28 +693,96 @@ document.addEventListener('DOMContentLoaded', async () => {
     const btn = document.getElementById('btn-pipeline-full');
     const logEl = document.getElementById('pipeline-log');
     const gs = document.getElementById('gen-status');
+    const prog = document.getElementById('pipeline-progress');
+    const progBar = document.getElementById('pipeline-progress-bar');
+    const progLabel = document.getElementById('pipeline-progress-label');
+    const progEta = document.getElementById('pipeline-progress-eta');
     if (btn) btn.disabled = true;
+    if (prog) {
+      prog.hidden = false;
+      prog.classList.remove('is-hidden');
+    }
+    if (progBar) progBar.style.width = '0%';
+    if (progLabel) progLabel.textContent = '正在策划全书结构…';
+    if (progEta) progEta.textContent = '';
     if (logEl) {
       logEl.hidden = false;
-      logEl.textContent =
-        '运行中：正在策划全书结构（第 1 次 API）…\n随后将逐章写作，请勿关闭窗口；总耗时与章数成正比。\n';
+      logEl.textContent = '流式进度见上方进度条；完成后此处显示摘要。\n';
     }
     if (gs) gs.textContent = '一键流水线运行中…';
+    const payload = {
+      title,
+      theme_id: document.getElementById('theme-id')?.value,
+      max_chapters: maxChapters,
+      length_scale: lengthScale,
+      protagonist_gender: protagonistGender,
+      use_long_memory: document.getElementById('cb-pipeline-memory')?.checked ?? true,
+      kb_names: selectedKbFiles(),
+      agent_profile: document.getElementById('pipeline-agent-profile')?.value || 'fast',
+      run_reader_test: document.getElementById('pipeline-reader-test')?.checked ?? false
+    };
     try {
-      const data = await fetchJson('/api/pipeline/from-title', {
+      const base = await apiBase();
+      const res = await fetch(`${base}/api/pipeline/from-title/stream`, {
         method: 'POST',
-        body: JSON.stringify({
-          title,
-          theme_id: document.getElementById('theme-id')?.value,
-          max_chapters: maxChapters,
-          length_scale: lengthScale,
-          protagonist_gender: protagonistGender,
-          use_long_memory: document.getElementById('cb-pipeline-memory')?.checked ?? true,
-          kb_names: selectedKbFiles(),
-          agent_profile: document.getElementById('pipeline-agent-profile')?.value || 'fast',
-          run_reader_test: document.getElementById('pipeline-reader-test')?.checked ?? false
-        })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
       });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || res.statusText);
+      }
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      let data = null;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split('\n');
+        buf = parts.pop() || '';
+        for (const line of parts) {
+          if (!line.trim()) continue;
+          let ev;
+          try {
+            ev = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (ev.event === 'phase' && progLabel) {
+            progLabel.textContent = ev.message || '处理中…';
+          }
+          if (ev.event === 'planned' && progLabel) {
+            progLabel.textContent = `策划完成 · 共 ${ev.total_chapters} 章 · 开始写作…`;
+            if (progBar) progBar.style.width = '3%';
+          }
+          if (ev.event === 'chapter_begin') {
+            if (progLabel) {
+              progLabel.textContent = `第 ${ev.index}/${ev.total} 章「${ev.title || ''}」生成中…`;
+            }
+            if (progEta && ev.eta_ms != null) {
+              progEta.textContent = `预计剩余 ${formatEta(ev.eta_ms)}`;
+            }
+            if (progBar && ev.total) {
+              const pct = Math.min(99, Math.round((ev.done / ev.total) * 100));
+              progBar.style.width = `${pct}%`;
+            }
+          }
+          if (ev.event === 'chapter_end' && progBar && ev.total) {
+            const pct = Math.min(100, Math.round((ev.done / ev.total) * 100));
+            progBar.style.width = `${pct}%`;
+            if (progEta) progEta.textContent = '';
+          }
+          if (ev.event === 'done') {
+            data = ev.result;
+          }
+          if (ev.event === 'error') {
+            throw new Error(ev.detail || '生成失败');
+          }
+        }
+      }
+      if (!data) throw new Error('未收到完成事件');
       const lines = [
         '—— 完成 ——',
         `书本 ID（续写、书库用）：${data.book_id || ''}`,
@@ -616,14 +795,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         ...(data.saved_files || [])
       ];
       if (logEl) logEl.textContent = lines.join('\n');
+      if (progBar) progBar.style.width = '100%';
+      if (progLabel) progLabel.textContent = '已完成';
+      if (progEta) progEta.textContent = '';
       const prem = document.getElementById('premise');
       if (prem && data.premise) prem.value = data.premise;
-      if (gs) gs.textContent = '已入库，可到「书库阅读」打开；下方可「续写下一章」。';
+      if (gs) gs.textContent = '已入库，可到「书库阅读」打开；下方可续写。';
       await refreshSeriesList();
       await refreshMemBookOptions();
     } catch (e) {
       if (logEl) logEl.textContent = `失败：${e.message}`;
       if (gs) gs.textContent = '';
+      if (progLabel) progLabel.textContent = '失败';
       window.alert(e.message || String(e));
     } finally {
       if (btn) btn.disabled = false;
@@ -653,13 +836,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         agent_profile: document.getElementById('pipeline-agent-profile')?.value || 'fast',
         run_reader_test: document.getElementById('pipeline-reader-test')?.checked ?? false
       };
-      let payload = { ...basePayload };
+      const cc = parseInt(String(document.getElementById('continue-chapter-count')?.value || '1'), 10);
+      const chapterCount = Number.isFinite(cc) ? Math.min(20, Math.max(1, cc)) : 1;
+      let payload = { ...basePayload, chapter_count: chapterCount };
       if (raw.startsWith('book:')) {
         payload.book_id = raw.slice(5);
       } else if (raw.startsWith('legacy:')) {
         payload.series_prefix = raw.slice(7);
         delete payload.agent_profile;
         delete payload.run_reader_test;
+        delete payload.chapter_count;
       } else {
         window.alert('选择项格式无效，请刷新列表后重选。');
         return;
@@ -669,7 +855,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         body: JSON.stringify(payload)
       });
       if (logEl) {
-        logEl.textContent = `—— 续写完成 ——\n${data.saved_file}\n第 ${data.chapter_index} 章\n书名：${data.book_title}${data.book_id ? `\n书本 ID：${data.book_id}` : ''}`;
+        if (data.chapters && Array.isArray(data.chapters)) {
+          logEl.textContent = `—— 续写完成 ${data.chapters_written || data.chapters.length} 章 ——\n${data.chapters.map((c) => `第 ${c.chapter_index} 章 ${c.chapter_title || ''} → ${c.saved_file}`).join('\n')}\n书名：${data.book_title || ''}`;
+        } else {
+          logEl.textContent = `—— 续写完成 ——\n${data.saved_file}\n第 ${data.chapter_index} 章 ${data.chapter_title || ''}\n书名：${data.book_title}${data.book_id ? `\n书本 ID：${data.book_id}` : ''}`;
+        }
       }
       if (gs) gs.textContent = '续写已保存，可在书库中阅读。';
       await refreshSeriesList();
@@ -694,14 +884,55 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       await window.aiWriter.saveSettings({
         deepseekApiKey: document.getElementById('api-key').value.trim(),
-        deepseekModel: document.getElementById('model-id').value.trim() || 'deepseek-chat'
+        deepseekModel: document.getElementById('model-id').value.trim() || 'deepseek-chat',
+        booksRoot: document.getElementById('books-root-path')?.value?.trim() || ''
       });
       await refreshHealth();
       await refreshThemes();
+      await refreshReaderShell();
     } catch (e) {
       alert(e.message || String(e));
     } finally {
       btn.disabled = false;
+    }
+  });
+
+  document.getElementById('reader-export-txt')?.addEventListener('click', async () => {
+    if (!readerBookId) return;
+    try {
+      const base = await apiBase();
+      const res = await fetch(`${base}/api/books/${encodeURIComponent(readerBookId)}/export.txt`);
+      if (!res.ok) throw new Error(await res.text());
+      const blob = await res.blob();
+      const u = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = u;
+      a.download = `${readerBookId}.txt`;
+      a.click();
+      URL.revokeObjectURL(u);
+    } catch (e) {
+      window.alert(e.message || String(e));
+    }
+  });
+
+  document.getElementById('reader-delete-book')?.addEventListener('click', async () => {
+    if (!readerBookId) return;
+    if (!window.confirm('将本书移入回收站？可在左侧「回收站」还原。')) return;
+    try {
+      await fetchJson(`/api/books/${encodeURIComponent(readerBookId)}`, { method: 'DELETE' });
+      readerBookId = '';
+      readerChapterN = 0;
+      readerToc = [];
+      document.getElementById('reader-content').innerHTML = '';
+      document.getElementById('reader-doc-title').textContent = '选择书本与章节';
+      document.getElementById('reader-meta').textContent = '';
+      document.getElementById('reader-chapter-nav').hidden = true;
+      document.getElementById('reader-export-txt').hidden = true;
+      document.getElementById('reader-delete-book').hidden = true;
+      document.getElementById('chapter-list').innerHTML = '';
+      await refreshReaderShell();
+    } catch (e) {
+      window.alert(e.message || String(e));
     }
   });
 

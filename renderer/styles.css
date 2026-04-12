@@ -824,10 +824,94 @@ body {
   margin-bottom: 0.85rem;
 }
 
+.reader-chapter-nav--footer {
+  margin-top: auto;
+  margin-bottom: 0;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
 .reader-chapter-nav .btn {
   flex: 1;
   min-width: 5.5rem;
   justify-content: center;
+}
+
+.reader-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.65rem;
+}
+
+.reader-danger {
+  color: var(--danger);
+  border-color: rgba(248, 113, 113, 0.45);
+}
+
+.books-root-row {
+  display: flex;
+  gap: 0.45rem;
+  align-items: stretch;
+  margin-bottom: 0.5rem;
+}
+
+.books-root-row .inp {
+  flex: 1;
+  min-width: 0;
+}
+
+.books-root-row .btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.pipeline-progress {
+  margin-top: 1rem;
+  padding: 0.85rem 1rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.pipeline-progress.is-hidden {
+  display: none !important;
+}
+
+.pipeline-progress__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  font-size: 0.82rem;
+  margin-bottom: 0.5rem;
+  color: var(--text-muted);
+}
+
+.pipeline-progress__eta {
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.pipeline-progress__track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.pipeline-progress__bar {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+  transition: width 0.35s var(--ease);
+}
+
+.trash-scroll {
+  max-height: min(240px, 28vh);
 }
 
 .library-item--chapter {
@@ -905,11 +989,12 @@ body {
 
 .reader-body {
   flex: 1;
+  min-height: 0;
   overflow: auto;
   font-family: var(--font-read);
   font-size: 1.08rem;
   line-height: 1.9;
-  max-height: calc(100vh - 200px);
+  max-height: calc(100vh - 280px);
   padding-right: 0.35rem;
 }
 

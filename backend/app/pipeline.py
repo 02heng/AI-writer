@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import HTTPException
 
@@ -26,6 +27,41 @@ from .scene_writer import generate_chapter_with_scenes
 from .layered_memory import build_context_for_chapter
 
 logger = get_logger(__name__)
+
+ProgressCb = Optional[Callable[[dict[str, Any]], None]]
+
+
+def sanitize_chapter_body(body: str) -> str:
+    """Strip HTML comments, decorative asterisk lines, and trim."""
+    t = body.strip()
+    t = re.sub(r"<!--[\s\S]*?-->", "", t)
+    lines_out: list[str] = []
+    for line in t.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            lines_out.append(line)
+            continue
+        if stripped in ("***", "* * *", "—", "——", "———", "===", "---"):
+            continue
+        if re.fullmatch(r"[\*\s─\-═]+", stripped):
+            continue
+        lines_out.append(line)
+    return "\n".join(lines_out).strip()
+
+
+def _chapter_heading(title: str, idx: int) -> str:
+    tt = (title or "").strip() or f"第 {idx} 章"
+    return f"## {tt}\n\n"
+
+
+def _fallback_chapter_title(ch: dict[str, Any], idx: int) -> str:
+    t = str(ch.get("title") or "").strip()
+    if t:
+        return t[:80]
+    beat = str(ch.get("beat") or "").strip().replace("\n", " ")
+    if len(beat) > 36:
+        return beat[:36].rstrip("，。；;,. ") + "…"
+    return beat or f"第 {idx} 章"
 
 
 def _safe_filename_prefix(title: str) -> str:
@@ -61,7 +97,10 @@ def _normalize_chapter_entry(c: dict[str, Any], fallback_idx: int) -> Optional[d
     beat = str(c.get("beat", "")).strip()
     if not beat:
         return None
+    title_raw = str(c.get("title") or "").strip()
     out: dict[str, Any] = {"idx": idx, "beat": beat}
+    if title_raw:
+        out["title"] = title_raw[:120]
     pov = str(c.get("pov", "")).strip()
     if pov:
         out["pov"] = pov
@@ -93,7 +132,9 @@ def _normalize_chapter_entry(c: dict[str, Any], fallback_idx: int) -> Optional[d
 
 def _format_chapter_contract(idx: int, ch: dict[str, Any], *, continuation: bool = False) -> str:
     tail = "（续写：须自然承接上一章语气和事实，勿重述已交代信息）" if continuation else ""
+    ch_title = _fallback_chapter_title(ch, idx)
     lines: list[str] = [f"【本章写作合同】第 {idx} 章{tail}"]
+    lines.append(f"【本章标题】{ch_title}（正文开头须用二级标题呈现：## {ch_title}）")
     lines.append(f"【节拍/要点】\n{ch.get('beat', '')}")
     pov = str(ch.get("pov", "")).strip()
     if pov:
@@ -137,6 +178,7 @@ def _plan_from_title(
         '{"book_title":"string","premise":"string 200-400字梗概",'
         '"chapters":['
         '{"idx":1,'
+        '"title":"string 必填，本章标题4-14字，用于目录与记忆检索，勿用标点堆砌",'
         '"beat":"string 必填，每章120-200字内要点：场景目标+冲突推进+章末悬念",'
         '"pov":"string 可选，叙事视角如 第三人称限定主角/全知 等",'
         '"scenes":["string 可选1-3条，具体场景或节拍"],'
@@ -172,16 +214,31 @@ def _plan_from_title(
     return data
 
 
-def _append_rollup_chapter_snippet(book_root: Path, book_title: str, idx: int, snippet: str) -> None:
+def _append_rollup_chapter_snippet(
+    book_root: Path,
+    book_title: str,
+    idx: int,
+    snippet: str,
+    *,
+    chapter_title: str = "",
+) -> None:
     cur = read_rollup(book_root).strip()
-    line = f"\n\n## 第 {idx} 章摘要（自动生成）\n{snippet.strip()[:900]}"
+    head = f"第 {idx} 章「{chapter_title}」" if chapter_title else f"第 {idx} 章"
+    line = f"\n\n## {head}摘要（自动生成）\n{snippet.strip()[:900]}"
     if "## 第" in cur and f"第 {idx} 章摘要" in cur:
         write_rollup(book_root, cur)
         return
     write_rollup(book_root, (cur + line).strip() + "\n")
 
 
-def _sync_book_memory_entries(book_root: Path, chapter_label: str, chapter_text: str, temperature: float) -> None:
+def _sync_book_memory_entries(
+    book_root: Path,
+    chapter_label: str,
+    chapter_text: str,
+    temperature: float,
+    *,
+    chapter_title: str = "",
+) -> None:
     sys_p = (
         "你是小说编辑。请阅读章节正文，提取可供后续章节参考的长期记忆要点。"
         "输出 5～8 条短句，每条一行，以「- 」开头；只写剧情/人物状态/伏笔/时间线，不要评论文笔。"
@@ -195,10 +252,15 @@ def _sync_book_memory_entries(book_root: Path, chapter_label: str, chapter_text:
         )
     except Exception:
         return
+    mem_title = (
+        f"「{chapter_title}」· 第 {chapter_label} 章 · 萃取"
+        if chapter_title
+        else f"第 {chapter_label} 章 · 生成同步萃取"
+    )
     add_entry(
         book_root,
         room="情节",
-        title=f"第 {chapter_label} 章 · 生成同步萃取",
+        title=mem_title,
         body=bullets.strip(),
         chapter_label=chapter_label,
     )
@@ -222,6 +284,7 @@ def run_pipeline_from_title(
     sync_book_memory: bool = True,
     run_reader_test: bool = False,
     use_scene_generation: bool = False,
+    progress_cb: ProgressCb = None,
 ) -> dict[str, Any]:
     """策划 → 逐章写作 → 写入 books/{book_id}/。
     
@@ -232,6 +295,10 @@ def run_pipeline_from_title(
     theme_hint = (theme_addon or "").strip()
     length_scale = length_scale if length_scale in ("short", "medium", "long") else "medium"
     protagonist_gender = protagonist_gender if protagonist_gender in ("male", "female", "any") else "any"
+    t0 = time.perf_counter()
+    if progress_cb:
+        progress_cb({"event": "phase", "phase": "planning", "message": "正在策划全书结构…"})
+
     try:
         n_ch = max(3, min(int(max_chapters), 25))
         plan_raw = _plan_from_title(
@@ -258,6 +325,8 @@ def run_pipeline_from_title(
             continue
         norm = _normalize_chapter_entry(c, len(chapters) + 1)
         if norm:
+            if "title" not in norm:
+                norm["title"] = _fallback_chapter_title(norm, norm["idx"])
             chapters.append(norm)
     chapters.sort(key=lambda x: x["idx"])
     if len(chapters) < 1:
@@ -300,6 +369,18 @@ def run_pipeline_from_title(
     book_id = str(created["book_id"])
     book_path = book_dir(root, book_id)
 
+    plan_ms = int((time.perf_counter() - t0) * 1000)
+    if progress_cb:
+        progress_cb(
+            {
+                "event": "planned",
+                "book_id": book_id,
+                "book_title": book_title,
+                "total_chapters": len(chapters),
+                "plan_ms": plan_ms,
+            }
+        )
+
     system = writer_system.strip()
     if theme_addon.strip():
         system = f"{system}\n\n【题材约束】\n{theme_addon.strip()}"
@@ -309,8 +390,25 @@ def run_pipeline_from_title(
     orch = read_orchestration_state(root, book_id)
     agent_logs: list[dict[str, Any]] = []
 
+    chapter_times: list[float] = []
     for ch in chapters:
         idx = ch["idx"]
+        ch_title = _fallback_chapter_title(ch, idx)
+        if progress_cb:
+            avg_ms = int((sum(chapter_times) / len(chapter_times)) * 1000) if chapter_times else None
+            remaining = len(chapters) - len(chapter_times)
+            eta_ms = int(avg_ms * remaining) if avg_ms is not None and remaining else None
+            progress_cb(
+                {
+                    "event": "chapter_begin",
+                    "index": idx,
+                    "title": ch_title,
+                    "done": len(chapter_times),
+                    "total": len(chapters),
+                    "eta_ms": eta_ms,
+                }
+            )
+        ch_start = time.perf_counter()
         contract = _format_chapter_contract(idx, ch, continuation=False)
         mem_book = ""
         if use_long_memory:
@@ -345,20 +443,38 @@ def run_pipeline_from_title(
         except Exception as e:
             raise HTTPException(502, f"第 {idx} 章生成失败: {e}") from e
 
-        header = f"<!-- book: {book_title} | chapter: {idx} -->\n\n"
-        content = header + body.strip() + "\n"
+        cleaned = sanitize_chapter_body(body)
+        content = _chapter_heading(ch_title, idx) + cleaned + "\n"
         write_chapter(root, book_id, idx, content)
         saved.append(str(book_path / "chapters" / f"{idx:02d}.md"))
         agent_logs.append({"chapter": idx, "log": alog})
 
-        snippet = body.strip().replace("\n", " ")[:320]
-        running_summary += f"\n第{idx}章：{snippet}"
+        elapsed = time.perf_counter() - ch_start
+        chapter_times.append(elapsed)
+        if progress_cb:
+            progress_cb(
+                {
+                    "event": "chapter_end",
+                    "index": idx,
+                    "title": ch_title,
+                    "duration_ms": int(elapsed * 1000),
+                    "done": len(chapter_times),
+                    "total": len(chapters),
+                }
+            )
+
+        snippet = cleaned.replace("\n", " ")[:320]
+        running_summary += f"\n第{idx}章「{ch_title}」：{snippet}"
         orch = orchestrator_bump_state(orch, step="chapter_draft", chapter=idx)
         write_orchestration_state(root, book_id, orch)
 
         if sync_book_memory:
-            _append_rollup_chapter_snippet(book_path, book_title, idx, snippet)
-            _sync_book_memory_entries(book_path, str(idx), body, temperature=0.38)
+            _append_rollup_chapter_snippet(
+                book_path, book_title, idx, snippet, chapter_title=ch_title
+            )
+            _sync_book_memory_entries(
+                book_path, str(idx), cleaned, temperature=0.38, chapter_title=ch_title
+            )
 
     prefix = _safe_filename_prefix(book_title)
     return {
@@ -444,10 +560,26 @@ def run_continue_next_chapter(
         except Exception as e:
             raise HTTPException(502, f"续写要点生成失败: {e}") from e
 
+    title_next = str((plan_chapter or {}).get("title") or "").strip()
+    if not title_next:
+        try:
+            title_next = chat_completion(
+                system=(
+                    "根据下列「下一章情节要点」，输出一个 6～14 字的章名。"
+                    "不要书名号、引号或解释，只一行标题。"
+                ),
+                user=beat_next[:900],
+                temperature=0.45,
+            ).strip()[:80]
+        except Exception:
+            title_next = ""
+    if not title_next:
+        title_next = f"第 {next_n} 章"
+
     if plan_chapter:
-        chapter_for_contract = {**plan_chapter, "idx": next_n, "beat": beat_next}
+        chapter_for_contract = {**plan_chapter, "idx": next_n, "beat": beat_next, "title": title_next}
     else:
-        chapter_for_contract = {"idx": next_n, "beat": beat_next}
+        chapter_for_contract = {"idx": next_n, "beat": beat_next, "title": title_next}
     contract_block = _format_chapter_contract(next_n, chapter_for_contract, continuation=True)
 
     system = writer_system.strip()
@@ -490,13 +622,20 @@ def run_continue_next_chapter(
     except Exception as e:
         raise HTTPException(502, f"第 {next_n} 章续写失败: {e}") from e
 
-    header = f"<!-- book: {book_title} | chapter: {next_n} | continued -->\n\n"
-    write_chapter(root, book_id, next_n, header + body.strip() + "\n")
+    cleaned = sanitize_chapter_body(body)
+    content = _chapter_heading(title_next, next_n) + cleaned + "\n"
+    write_chapter(root, book_id, next_n, content)
 
     try:
         if isinstance(chs, list):
             if not any(isinstance(x, dict) and int(x.get("idx", 0)) == next_n for x in chs):
-                chs.append({"idx": next_n, "beat": beat_next[:800]})
+                chs.append({"idx": next_n, "beat": beat_next[:800], "title": title_next})
+            else:
+                for x in chs:
+                    if isinstance(x, dict) and int(x.get("idx", 0)) == next_n:
+                        x["beat"] = beat_next[:800]
+                        x["title"] = title_next
+                        break
             plan_data["chapters"] = chs
             update_plan(root, book_id, plan_data)
     except Exception:
@@ -510,17 +649,76 @@ def run_continue_next_chapter(
     write_orchestration_state(root, book_id, orch)
 
     if sync_book_memory:
-        snippet = body.strip().replace("\n", " ")[:320]
-        _append_rollup_chapter_snippet(book_path, book_title, next_n, snippet)
-        _sync_book_memory_entries(book_path, str(next_n), body, temperature=0.38)
+        snippet = cleaned.replace("\n", " ")[:320]
+        _append_rollup_chapter_snippet(
+            book_path, book_title, next_n, snippet, chapter_title=title_next
+        )
+        _sync_book_memory_entries(
+            book_path, str(next_n), cleaned, temperature=0.38, chapter_title=title_next
+        )
 
     return {
         "book_id": book_id,
         "book_title": book_title,
         "chapter_index": next_n,
+        "chapter_title": title_next,
         "saved_file": str(book_path / "chapters" / f"{next_n:02d}.md"),
         "series_prefix": _safe_filename_prefix(book_title),
         "agent_log": alog,
+    }
+
+
+def run_continue_chapters(
+    *,
+    root: Path,
+    book_id: str,
+    count: int,
+    theme_addon: str,
+    writer_system: str,
+    use_long_memory: bool,
+    memory_context_global: str,
+    kb_block: str,
+    writing_temp: float,
+    agent_profile: str = "fast",
+    sync_book_memory: bool = True,
+    run_reader_test: bool = False,
+    progress_cb: ProgressCb = None,
+) -> dict[str, Any]:
+    """续写多章：逐章调用 run_continue_next_chapter。"""
+    n = max(1, min(int(count), 20))
+    results: list[dict[str, Any]] = []
+    last: dict[str, Any] = {}
+    for i in range(n):
+        if progress_cb:
+            progress_cb({"event": "continue_begin", "i": i + 1, "total": n})
+        last = run_continue_next_chapter(
+            root=root,
+            book_id=book_id,
+            theme_addon=theme_addon,
+            writer_system=writer_system,
+            use_long_memory=use_long_memory,
+            memory_context_global=memory_context_global,
+            kb_block=kb_block,
+            writing_temp=writing_temp,
+            agent_profile=agent_profile,
+            sync_book_memory=sync_book_memory,
+            run_reader_test=run_reader_test,
+        )
+        results.append(
+            {
+                "chapter_index": last.get("chapter_index"),
+                "chapter_title": last.get("chapter_title"),
+                "saved_file": last.get("saved_file"),
+            }
+        )
+        if progress_cb:
+            progress_cb({"event": "continue_end", "i": i + 1, "total": n, "chapter": last})
+    return {
+        "book_id": book_id,
+        "book_title": last.get("book_title"),
+        "chapters_written": n,
+        "chapters": results,
+        "last": last,
     }
 
 
@@ -622,9 +820,11 @@ def run_continue_next_chapter_legacy_out(
 
     fname = f"{prefix}_第{next_n:02d}章.md"
     fpath = out_dir / Path(fname).name
-    header = f"<!-- book: {book_title} | chapter: {next_n} | continued -->\n\n"
+    title_line = f"第 {next_n} 章"
+    cleaned = sanitize_chapter_body(body)
+    out_text = f"## {title_line}\n\n{cleaned}\n"
     try:
-        fpath.write_text(header + body.strip() + "\n", encoding="utf-8")
+        fpath.write_text(out_text, encoding="utf-8")
     except OSError as e:
         raise HTTPException(500, f"写入失败: {e}") from e
 

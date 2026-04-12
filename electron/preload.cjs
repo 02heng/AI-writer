@@ -9,5 +9,6 @@ contextBridge.exposeInMainWorld('aiWriter', {
   getBackendUrl: () => ipcRenderer.invoke('aiwriter:get-backend-url'),
   loadSettings: () => ipcRenderer.invoke('aiwriter:load-settings'),
   saveSettings: (data) => ipcRenderer.invoke('aiwriter:save-settings', data),
-  restartBackend: () => ipcRenderer.invoke('aiwriter:restart-backend')
+  restartBackend: () => ipcRenderer.invoke('aiwriter:restart-backend'),
+  pickBooksDir: () => ipcRenderer.invoke('aiwriter:pick-books-dir')
 });

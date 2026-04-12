@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, session, shell, ipcMain } = require('electron');
+const { app, BrowserWindow, session, shell, ipcMain, dialog } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { applyNonSystemDrivePaths } = require('./paths.cjs');
@@ -29,20 +29,41 @@ ipcMain.handle('aiwriter:load-settings', () => {
     const s = JSON.parse(raw);
     return {
       deepseekApiKey: s.deepseekApiKey || '',
-      deepseekModel: s.deepseekModel || 'deepseek-chat'
+      deepseekModel: s.deepseekModel || 'deepseek-chat',
+      booksRoot: s.booksRoot || ''
     };
   } catch {
-    return { deepseekApiKey: '', deepseekModel: 'deepseek-chat' };
+    return { deepseekApiKey: '', deepseekModel: 'deepseek-chat', booksRoot: '' };
   }
 });
 
 ipcMain.handle('aiwriter:save-settings', async (_e, data) => {
   const dir = path.dirname(settingsPath());
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(settingsPath(), JSON.stringify(data, null, 2), 'utf8');
+  const prev = {};
+  try {
+    Object.assign(prev, JSON.parse(fs.readFileSync(settingsPath(), 'utf8')));
+  } catch {
+    // ignore
+  }
+  const merged = {
+    deepseekApiKey: data.deepseekApiKey ?? prev.deepseekApiKey ?? '',
+    deepseekModel: data.deepseekModel ?? prev.deepseekModel ?? 'deepseek-chat',
+    booksRoot: data.booksRoot !== undefined ? data.booksRoot : prev.booksRoot || ''
+  };
+  fs.writeFileSync(settingsPath(), JSON.stringify(merged, null, 2), 'utf8');
   stopBackend();
   await startBackend({ userDataPath: app.getPath('userData'), projectRoot });
   return { ok: true };
+});
+
+ipcMain.handle('aiwriter:pick-books-dir', async () => {
+  const win = BrowserWindow.getFocusedWindow();
+  const r = await dialog.showOpenDialog(win || undefined, {
+    properties: ['openDirectory', 'createDirectory']
+  });
+  if (r.canceled || !r.filePaths || !r.filePaths[0]) return '';
+  return r.filePaths[0];
 });
 
 ipcMain.handle('aiwriter:restart-backend', async () => {

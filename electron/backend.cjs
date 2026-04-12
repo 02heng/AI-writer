@@ -88,6 +88,7 @@ function startBackend({ userDataPath, projectRoot }) {
     const settings = readSettings(userDataPath);
     const apiKey = (settings.deepseekApiKey || process.env.DEEPSEEK_API_KEY || '').trim();
     const model = (settings.deepseekModel || 'deepseek-chat').trim();
+    const booksRoot = (settings.booksRoot || '').trim();
 
     const backendDir = path.join(projectRoot, 'backend');
     const { cmd, argsPrefix } = getPythonCmd();
@@ -110,6 +111,9 @@ function startBackend({ userDataPath, projectRoot }) {
       PYTHONUTF8: '1',
       PYTHONIOENCODING: 'utf-8'
     };
+    if (booksRoot) {
+      env.AIWRITER_BOOKS_ROOT = booksRoot;
+    }
 
     try {
       backendProcess = spawn(cmd, args, {
