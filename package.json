@@ -1,13 +1,14 @@
 {
   "name": "ai-writer",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "AI novel writer — Electron shell, data on D:/E: drive",
+  "author": "02heng",
   "main": "electron/main.cjs",
   "scripts": {
     "start": "electron .",
     "backend": "npm run dev --prefix backend",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder"
+    "dist": "electron-builder --publish never"
   },
   "devDependencies": {
     "electron": "^35.0.0",

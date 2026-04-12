@@ -1,4 +1,5 @@
-# 打 tag 推送（如 v0.2.1）后自动构建 Windows NSIS + macOS DMG/ZIP，并创建 GitHub Release。
+# 打 tag 推送（如 v0.2.2）后自动构建 Windows NSIS + macOS DMG/ZIP，并创建 GitHub Release。
+# package.json 的 dist 必须使用 --publish never，否则在 tag 构建时 electron-builder 会尝试发布并要求 GH_TOKEN。
 # 手动运行 workflow（workflow_dispatch）仅上传 Actions 构件，不创建 Release。
 name: Release desktop (Windows & macOS)
 
