@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.pyo
+.pyd
+.Python
+*.so
+.eggs/
+*.egg-info/
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Environment
+.env
+.env.local
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build
+dist/
+build/
+release/
+*.spec
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Cache
+.cache/
+.parcel-cache/
+.electron/
+
+# Data (user data should not be committed)
+AI-writer-data/
+*.sqlite3

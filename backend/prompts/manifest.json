@@ -1,0 +1,13 @@
+{
+  "version": "2026-04-12",
+  "prompts": {
+    "writer.md": {
+      "role": "chapter-author",
+      "notes": "Structured role/task/constraints; chapter contract injected in user message by pipeline."
+    },
+    "checker.md": {
+      "role": "chapter-revision",
+      "notes": "Optional manual pass; not wired in default pipeline."
+    }
+  }
+}

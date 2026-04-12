@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="ember">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data: blob:; connect-src 'self' http://127.0.0.1:* http://localhost:*; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:;"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Writer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=Crimson+Pro:ital,wght@0,400;0,600;0,700;1,400&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="themes.css" />
+  </head>
+  <body>
+    <div class="noise" aria-hidden="true"></div>
+    <div class="app-shell">
+      <header class="shell-header">
+        <div class="brand">
+          <span class="brand-glyph" aria-hidden="true">文</span>
+          <div class="brand-text">
+            <span class="brand-name">AI Writer</span>
+            <span class="brand-sub">本地书库 · 记忆宫殿 · DeepSeek</span>
+          </div>
+        </div>
+
+        <nav class="view-tabs" role="tablist" aria-label="主视图">
+          <button type="button" class="view-tab is-active" data-panel="write" id="tab-write" role="tab" aria-selected="true">
+            写作台
+          </button>
+          <button type="button" class="view-tab" data-panel="read" id="tab-read" role="tab" aria-selected="false">
+            书库阅读
+          </button>
+        </nav>
+
+        <div class="header-right">
+          <div class="theme-select-wrap">
+            <label for="ui-theme">界面主题</label>
+            <select id="ui-theme" class="inp inp-select inp-theme" aria-label="界面配色主题">
+              <option value="ember">余烬金</option>
+              <option value="aurora">极光青</option>
+              <option value="moss">苔原绿</option>
+              <option value="noir">夜幕紫</option>
+              <option value="dawn">拂晓玫</option>
+            </select>
+          </div>
+          <span id="backend-status" class="status-pill" role="status">检测后端…</span>
+        </div>
+      </header>
+
+      <!-- 写作 -->
+      <div id="panel-write" class="view-panel is-active" role="tabpanel">
+        <div class="write-grid">
+          <aside class="side-rail">
+            <details class="rail-card" open>
+              <summary class="rail-title">环境与密钥</summary>
+              <p id="paths-display" class="rail-paths is-hidden" hidden></p>
+              <label class="lbl">DeepSeek API Key</label>
+              <input type="password" id="api-key" class="inp" autocomplete="off" placeholder="sk-…" />
+              <label class="lbl">模型 ID</label>
+              <input type="text" id="model-id" class="inp" value="deepseek-chat" />
+              <button type="button" class="btn btn-primary btn-block" id="btn-save-settings">保存并重启后端</button>
+              <p class="rail-hint">密钥仅存本机 UserData（D/E 盘路径），除调用模型外不上传。</p>
+            </details>
+
+            <details class="rail-card" open>
+              <summary class="rail-title">知识库 · kb</summary>
+              <p class="rail-hint">勾选参与生成的 Markdown</p>
+              <div id="kb-list" class="kb-stack"></div>
+              <button type="button" class="btn btn-ghost btn-block" id="btn-refresh-kb">刷新列表</button>
+            </details>
+          </aside>
+
+          <main class="compose-main">
+            <section class="surface surface--solo" style="--stagger: 0">
+              <div class="surface-head">
+                <h2 class="surface-title">只写题目 · 全书初稿</h2>
+                <p class="surface-lead">
+                  填写题目、题材、篇幅、章数与主角性别即可。AI 会策划全书并逐章写入本地
+                  <span class="inline-code">books/&lt;书本ID&gt;/</span>，在「书库阅读」按书本 → 章节目录打开；也可在此「续写下一章」。
+                  左侧勾选的知识库会参与生成与续写。
+                </p>
+              </div>
+
+              <div class="form-grid">
+                <div class="form-col-span2">
+                  <label class="lbl lbl-strong" for="theme-id">小说题材 / 类型</label>
+                  <select id="theme-id" class="inp inp-select"></select>
+                  <p id="theme-desc" class="theme-blurb"></p>
+                </div>
+                <div class="form-col-span2">
+                  <label class="lbl lbl-strong" for="solo-title">题目 / 书名 / 灵感</label>
+                  <input type="text" id="solo-title" class="inp" maxlength="200" placeholder="例如：锈蚀之星、夜班便利店员看见龙" />
+                </div>
+                <div>
+                  <label class="lbl" for="solo-length">篇幅</label>
+                  <select id="solo-length" class="inp inp-select">
+                    <option value="short">短篇（节奏紧、单线为主）</option>
+                    <option value="medium" selected>中篇</option>
+                    <option value="long">长篇（多线、伏笔与铺陈）</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="lbl" for="solo-gender">主角</label>
+                  <select id="solo-gender" class="inp inp-select">
+                    <option value="male">男主</option>
+                    <option value="female">女主</option>
+                    <option value="any" selected>不限 / 由故事定</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="lbl" for="solo-chapters">总章数</label>
+                  <input type="number" id="solo-chapters" class="inp" min="3" max="25" value="8" />
+                </div>
+                <div>
+                  <label class="lbl" for="pipeline-agent-profile">编排模式</label>
+                  <select id="pipeline-agent-profile" class="inp inp-select">
+                    <option value="fast" selected>快速（单写作智能体）</option>
+                    <option value="full">完整（Character / Lore / Editor / Safety 链）</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="lbl" for="pipeline-reader-test">&nbsp;</label>
+                  <label class="chk-row chk-row--tight" style="margin: 0; padding-top: 0.35rem">
+                    <input type="checkbox" id="pipeline-reader-test" />
+                    <span>每章追加盲测读者（仅 full，额外 API）</span>
+                  </label>
+                </div>
+                <div class="form-col-span2">
+                  <label class="chk-row chk-row--tight">
+                    <input type="checkbox" id="cb-pipeline-memory" checked />
+                    <span>生成时注入长期记忆（本书宫殿 + 可选全局宫殿）</span>
+                  </label>
+                  <p class="rail-hint">
+                    快速模式约「章数 + 1」次 API；完整模式每章多次调用。章数越多越慢。
+                  </p>
+                </div>
+                <div class="form-actions">
+                  <button type="button" class="btn btn-primary" id="btn-pipeline-full">生成全书并入库</button>
+                </div>
+              </div>
+              <pre id="pipeline-log" class="pipeline-log" hidden></pre>
+
+              <h3 class="sub-block-title">续写下一章</h3>
+              <p class="rail-hint">
+                优先选择「书本」（新库）；仍支持旧版 <span class="inline-code">out/</span> 前缀书系。续写沿用上方题材与编排模式。
+              </p>
+              <div class="form-grid">
+                <div class="form-col-span2">
+                  <label class="lbl" for="series-continue-select">书本 / 书系</label>
+                  <select id="series-continue-select" class="inp inp-select">
+                    <option value="">—— 点击刷新加载 ——</option>
+                  </select>
+                </div>
+                <div class="form-actions">
+                  <button type="button" class="btn btn-secondary" id="btn-refresh-series">刷新列表</button>
+                  <button type="button" class="btn btn-primary" id="btn-continue-chapter">续写下一章</button>
+                </div>
+                <div class="form-col-span2">
+                  <label class="chk-row chk-row--tight">
+                    <input type="checkbox" id="cb-continue-memory" checked />
+                    <span>续写时注入长期记忆</span>
+                  </label>
+                </div>
+              </div>
+              <pre id="continue-log" class="pipeline-log" hidden></pre>
+            </section>
+
+            <details class="manual-panel">
+              <summary class="manual-panel__summary">进阶 · 手动梗概、大纲或单章</summary>
+              <div class="manual-panel__body">
+            <section class="surface surface--story" style="--stagger: 1">
+              <div class="surface-head">
+                <h2 class="surface-title">故事梗概与大纲</h2>
+                <p class="surface-lead">题材以上方「只写题目」区为准。可自写梗概或在一键生成后在此修改再出大纲。</p>
+              </div>
+
+              <div class="form-grid">
+                <div class="form-col-span2">
+                  <label class="lbl" for="premise">故事梗概</label>
+                  <textarea id="premise" class="inp inp-area" rows="4" placeholder="一句话到一段话，交代核心冲突与世界观线索…"></textarea>
+                </div>
+                <div class="form-actions">
+                  <button type="button" class="btn btn-secondary" id="btn-outline">生成分章大纲</button>
+                </div>
+              </div>
+              <pre id="outline-out" class="outline-block" hidden></pre>
+            </section>
+
+            <section class="surface surface--chapter" style="--stagger: 2">
+              <div class="surface-head">
+                <h2 class="surface-title">本章正文</h2>
+                <p class="surface-lead">题材仍以上方选择为准；适合对某一章单独重写或扩写。</p>
+              </div>
+
+              <label class="chk-row">
+                <input type="checkbox" id="cb-long-memory" checked />
+                <span>注入长期记忆（总摘要 + 近期条目）</span>
+              </label>
+
+              <div class="form-grid">
+                <div>
+                  <label class="lbl" for="prompt-name">系统提示词文件</label>
+                  <select id="prompt-name" class="inp inp-select"></select>
+                </div>
+                <div class="form-col-span2">
+                  <label class="lbl" for="chapter-brief">本章要点 / 指令</label>
+                  <textarea
+                    id="chapter-brief"
+                    class="inp inp-area"
+                    rows="7"
+                    placeholder="节拍、视角、必须出现的角色或道具、禁止事项…"
+                  ></textarea>
+                </div>
+                <div class="form-actions">
+                  <button type="button" class="btn btn-primary" id="btn-generate">生成正文</button>
+                  <button type="button" class="btn btn-secondary" id="btn-save-md" disabled>保存到 out/</button>
+                </div>
+              </div>
+              <p id="gen-status" class="gen-status"></p>
+              <article
+                id="chapter-out"
+                class="chapter-canvas"
+                contenteditable="true"
+                data-placeholder="正文将显示于此，可直接编辑…"
+              ></article>
+            </section>
+              </div>
+            </details>
+
+            <section class="surface surface--memory" style="--stagger: 3">
+              <div class="surface-head">
+                <h2 class="surface-title">长期记忆 · 记忆宫殿</h2>
+                <p class="surface-lead">
+                  思路参考
+                  <a href="https://github.com/milla-jovovich/mempalace" class="inline-link" target="_blank" rel="noopener noreferrer">MemPalace</a>
+                  ：总摘要 + 分条事实。可选「全局」或「指定书本」（与生成同步写入本书 <code class="inline-code">books/…/memory/</code>）。
+                </p>
+              </div>
+
+              <label class="lbl" for="mem-scope-book">记忆范围</label>
+              <select id="mem-scope-book" class="inp inp-select">
+                <option value="">全局记忆宫殿（跨书共享）</option>
+              </select>
+
+              <label class="lbl" for="memory-rollup">总摘要（衣柜层）</label>
+              <textarea id="memory-rollup" class="inp inp-area" rows="5" placeholder="主线、人物状态、伏笔与时间线…"></textarea>
+              <button type="button" class="btn btn-secondary" id="btn-save-rollup">保存总摘要</button>
+
+              <h3 class="sub-block-title">新增条目（抽屉层）</h3>
+              <div class="mem-two">
+                <div>
+                  <label class="lbl" for="mem-room">房间</label>
+                  <select id="mem-room" class="inp inp-select">
+                    <option value="人物">人物</option>
+                    <option value="情节">情节</option>
+                    <option value="世界观">世界观</option>
+                    <option value="伏笔">伏笔</option>
+                    <option value="风格">风格</option>
+                    <option value="其他">其他</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="lbl" for="mem-chapter">关联章节（可选）</label>
+                  <input type="text" id="mem-chapter" class="inp" placeholder="如 第 3 章" />
+                </div>
+              </div>
+              <label class="lbl" for="mem-title">标题</label>
+              <input type="text" id="mem-title" class="inp" placeholder="简短标题" />
+              <label class="lbl" for="mem-body">内容</label>
+              <textarea id="mem-body" class="inp inp-area" rows="3" placeholder="需要记住的设定或剧情事实…"></textarea>
+              <div class="form-actions">
+                <button type="button" class="btn btn-primary" id="btn-mem-add">添加条目</button>
+                <button type="button" class="btn btn-secondary" id="btn-mem-extract">从本章萃取（API）</button>
+                <button type="button" class="btn btn-ghost" id="btn-mem-refresh">刷新</button>
+              </div>
+
+              <h3 class="sub-block-title">近期条目</h3>
+              <div id="mem-list" class="mem-scroll"></div>
+            </section>
+          </main>
+        </div>
+      </div>
+
+      <!-- 阅读 -->
+      <div id="panel-read" class="view-panel" role="tabpanel">
+        <div class="reader-grid">
+          <aside class="reader-books surface">
+            <h2 class="reader-side-title">书本</h2>
+            <p class="reader-side-lead">每本书独立目录与记忆宫殿；一键生成会出现在此。</p>
+            <button type="button" class="btn btn-primary btn-block" id="btn-library-refresh">刷新</button>
+            <div id="book-list" class="library-scroll" role="list"></div>
+            <p class="rail-hint" style="margin-top: 0.75rem">旧版 flat 章节</p>
+            <button type="button" class="btn btn-ghost btn-block" id="btn-legacy-files-toggle">展开 out/*.md</button>
+            <div id="legacy-file-list" class="library-scroll is-hidden" hidden></div>
+          </aside>
+          <aside class="reader-toc surface">
+            <h2 class="reader-side-title">目录</h2>
+            <p class="reader-side-lead" id="reader-book-hint">先选一本书</p>
+            <div id="chapter-list" class="library-scroll" role="list"></div>
+          </aside>
+          <section class="reader-pane surface">
+            <header class="reader-pane-head">
+              <div class="reader-chapter-nav" id="reader-chapter-nav" hidden>
+                <button type="button" class="btn btn-secondary" id="reader-prev-ch">上一章</button>
+                <button type="button" class="btn btn-ghost" id="reader-toc-focus">目录</button>
+                <button type="button" class="btn btn-secondary" id="reader-next-ch">下一章</button>
+              </div>
+              <h2 id="reader-doc-title" class="reader-pane-title">选择书本与章节</h2>
+              <p id="reader-meta" class="reader-pane-meta"></p>
+            </header>
+            <article id="reader-content" class="reader-body" aria-live="polite"></article>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <script src="md-lite.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

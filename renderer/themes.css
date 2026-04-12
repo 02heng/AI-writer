@@ -1,0 +1,101 @@
+/* UI 主题预设：通过 document.documentElement.dataset.theme 切换 */
+
+[data-theme="ember"] {
+  --bg-deep: #080706;
+  --bg: #0e0c0a;
+  --surface: #161311;
+  --surface-2: #1e1b18;
+  --border: rgba(245, 240, 232, 0.09);
+  --border-strong: rgba(212, 165, 116, 0.35);
+  --text: #f0ebe3;
+  --text-muted: #9a9288;
+  --accent: #d4a574;
+  --accent-hover: #e4b88a;
+  --accent-dim: #8b6914;
+  --danger: #f87171;
+  --ok: #86efac;
+  --glow-accent: rgba(212, 165, 116, 0.14);
+  --scrollbar-track: rgba(14, 12, 10, 0.6);
+  --scrollbar-thumb: rgba(212, 165, 116, 0.35);
+  --scrollbar-thumb-hover: rgba(212, 165, 116, 0.55);
+}
+
+[data-theme="aurora"] {
+  --bg-deep: #060a10;
+  --bg: #0a1018;
+  --surface: #111a26;
+  --surface-2: #152030;
+  --border: rgba(200, 220, 255, 0.08);
+  --border-strong: rgba(125, 211, 252, 0.35);
+  --text: #e8f1ff;
+  --text-muted: #8ba0b8;
+  --accent: #7dd3fc;
+  --accent-hover: #a5e6ff;
+  --accent-dim: #0c4a6e;
+  --danger: #fca5a5;
+  --ok: #6ee7b7;
+  --glow-accent: rgba(125, 211, 252, 0.12);
+  --scrollbar-track: rgba(10, 16, 24, 0.65);
+  --scrollbar-thumb: rgba(125, 211, 252, 0.32);
+  --scrollbar-thumb-hover: rgba(125, 211, 252, 0.5);
+}
+
+[data-theme="moss"] {
+  --bg-deep: #050806;
+  --bg: #0b120d;
+  --surface: #121c16;
+  --surface-2: #18261e;
+  --border: rgba(200, 230, 210, 0.08);
+  --border-strong: rgba(52, 211, 153, 0.32);
+  --text: #e8f5ec;
+  --text-muted: #8aa898;
+  --accent: #34d399;
+  --accent-hover: #5ee9b0;
+  --accent-dim: #065f46;
+  --danger: #fb923c;
+  --ok: #a7f3d0;
+  --glow-accent: rgba(52, 211, 153, 0.1);
+  --scrollbar-track: rgba(11, 18, 13, 0.65);
+  --scrollbar-thumb: rgba(52, 211, 153, 0.28);
+  --scrollbar-thumb-hover: rgba(52, 211, 153, 0.48);
+}
+
+[data-theme="noir"] {
+  --bg-deep: #050506;
+  --bg: #0c0c0f;
+  --surface: #141418;
+  --surface-2: #1a1a20;
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(196, 181, 253, 0.35);
+  --text: #f4f4f5;
+  --text-muted: #9ca3af;
+  --accent: #c4b5fd;
+  --accent-hover: #ddd6fe;
+  --accent-dim: #5b21b6;
+  --danger: #f87171;
+  --ok: #86efac;
+  --glow-accent: rgba(196, 181, 253, 0.1);
+  --scrollbar-track: rgba(12, 12, 15, 0.7);
+  --scrollbar-thumb: rgba(196, 181, 253, 0.28);
+  --scrollbar-thumb-hover: rgba(196, 181, 253, 0.45);
+}
+
+[data-theme="dawn"] {
+  --bg-deep: #0d0806;
+  --bg: #140c0a;
+  --surface: #1c1210;
+  --surface-2: #261a16;
+  --border: rgba(255, 200, 180, 0.08);
+  --border-strong: rgba(251, 113, 133, 0.38);
+  --text: #fff1f2;
+  --text-muted: #b9a099;
+  --accent: #fb7185;
+  --accent-hover: #fda4af;
+  --accent-dim: #9f1239;
+  --danger: #fca5a5;
+  --ok: #86efac;
+  --glow-accent: rgba(251, 113, 133, 0.12);
+  --scrollbar-track: rgba(20, 12, 10, 0.65);
+  --scrollbar-thumb: rgba(251, 113, 133, 0.3);
+  --scrollbar-thumb-hover: rgba(251, 113, 133, 0.48);
+}

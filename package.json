@@ -1,0 +1,36 @@
+{
+  "name": "ai-writer",
+  "version": "0.1.0",
+  "description": "AI novel writer — Electron shell, data on D:/E: drive",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "backend": "npm run dev --prefix backend",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "com.aiwriter.app",
+    "productName": "AI Writer",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "renderer/**/*",
+      "backend/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": ["nsis"]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
