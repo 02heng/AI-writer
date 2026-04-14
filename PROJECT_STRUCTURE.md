@@ -16,8 +16,8 @@
 
 - `main.cjs`：创建窗口、加载 `renderer/index.html`
 - `preload.cjs`：暴露 `getBackendUrl`、`getPaths`、`loadSettings`、`saveSettings` 等给渲染进程
-- `backend.cjs`：在子进程启动 Python API（默认端口 `18765`）
-- `paths.cjs`：解析 UserData 根目录
+- `backend.cjs`：在子进程启动 Python API（默认端口 `18765`）；为子进程设置 `TEMP`/`TMP` 到 `UserData/.runtime-temp`，减少临时文件写系统盘
+- `paths.cjs`：解析 UserData 根目录；在数据根下创建 `UserData`、`Cache`、`Downloads`、`Logs`、`Temp`；早期调试日志写入 `Logs/`
 
 ## 前端（`renderer/`）
 
@@ -32,7 +32,7 @@
 | 模块 | 职责 |
 |------|------|
 | `main.py` | FastAPI 应用：健康检查、题材、KB、提示词、生成、大纲、流水线、**书本与按书记忆 API**、全局记忆宫殿 |
-| `paths.py` / `ensure_layout` | 解析数据根目录并创建 `kb/`、`prompts/`、`out/`、`memory/`、`books/` 等 |
+| `paths.py` / `ensure_layout` | 解析数据根目录并创建 `kb/`、`prompts/`、`out/`、`memory/`、`books/` 等；未设 `AIWRITER_USER_DATA` 时 Windows 与 Electron 一致优先 `D:/AI-writer-data/UserData`（pytest 或 `AIWRITER_USE_CWD_USER_DATA=1` 时用当前工作目录） |
 | `llm.py` | DeepSeek（OpenAI 兼容）同步/流式调用 |
 | `memory_store.py` | 给定任意「书根路径」下的 `memory/`：SQLite 条目 + `palace_summary.md`；`build_memory_context` 拼上下文 |
 | `book_storage.py` | `books/index.json` 注册表；`books/<id>/`：`meta.json`、`plan.json`、`chapters/NN.md`、`memory/`、`orchestration/state.json` |

@@ -39,6 +39,8 @@ from .pipeline import (
     MAX_CONTINUE_CHAPTERS,
     MAX_PIPELINE_CHAPTERS,
     MAX_PLANNED_TOTAL_CHAPTERS,
+    PLANNER_ORIGINALITY_CONTRACT,
+    ideation_instruction,
     run_continue_chapters,
     run_continue_next_chapter,
     run_continue_next_chapter_legacy_out,
@@ -149,6 +151,12 @@ class GenerateBody(BaseModel):
     temperature: float = Field(default=0.8, ge=0, le=2)
     stream: bool = False
     theme_id: Optional[str] = Field(default="general", description="小说主题/类型")
+    ideation_level: float = Field(
+        default=0.5,
+        ge=0,
+        le=1,
+        description="脑洞程度：0 极保守，0.5 正常，1 高创意（须自洽）",
+    )
     use_long_memory: bool = Field(default=True, description="是否注入长期记忆上下文")
     memory_max_chars: int = Field(default=4500, ge=500, le=32000)
 
@@ -157,6 +165,12 @@ class OutlineBody(BaseModel):
     premise: str = Field(..., min_length=1)
     temperature: float = Field(default=0.7, ge=0, le=2)
     theme_id: Optional[str] = Field(default="general")
+    ideation_level: float = Field(
+        default=0.5,
+        ge=0,
+        le=1,
+        description="脑洞程度：0 极保守，0.5 正常，1 高创意",
+    )
 
 
 class MemoryEntryCreate(BaseModel):
@@ -205,6 +219,17 @@ class PipelineFromTitleBody(BaseModel):
         description="fast=单 Writer；full=多智能体链（Character/Continuity/Editor/Safety 等）",
     )
     run_reader_test: bool = Field(default=False, description="full 模式下是否追加盲测读者智能体")
+    ideation_level: float = Field(
+        default=0.5,
+        ge=0,
+        le=1,
+        description="脑洞程度：0 极保守，0.5 正常，1 高创意（策划与逐章正文均参考）",
+    )
+    user_book_note: Optional[str] = Field(
+        default=None,
+        max_length=8000,
+        description="可选：用户对整部书的看法、立意、气质或禁忌；写入 meta 与记忆宫殿并参与策划与写作",
+    )
 
     @model_validator(mode="after")
     def planned_total_ge_round(self) -> PipelineFromTitleBody:
@@ -229,6 +254,12 @@ class PipelineContinueBody(BaseModel):
         ge=1,
         le=MAX_CONTINUE_CHAPTERS,
         description="续写章数（仅 book_id 模式；旧 out/ 书系仍为 1 章）",
+    )
+    ideation_level: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="覆盖脑洞程度；不传则沿用书本 plan.meta.ideation_level，缺省 0.5",
     )
 
 
@@ -556,6 +587,8 @@ def pipeline_from_title(body: PipelineFromTitleBody):
             agent_profile=ap,
             run_reader_test=bool(body.run_reader_test),
             planned_total_chapters=body.planned_total_chapters,
+            ideation_level=body.ideation_level,
+            user_book_note=body.user_book_note,
         )
     except HTTPException:
         raise
@@ -611,6 +644,8 @@ async def pipeline_from_title_stream(body: PipelineFromTitleBody):
                     run_reader_test=bool(body.run_reader_test),
                     progress_cb=progress,
                     planned_total_chapters=body.planned_total_chapters,
+                    ideation_level=body.ideation_level,
+                    user_book_note=body.user_book_note,
                 )
                 q.put(("done", r))
             except HTTPException as he:
@@ -682,6 +717,7 @@ def pipeline_continue(body: PipelineContinueBody):
                     writing_temp=body.writing_temperature,
                     agent_profile=ap,
                     run_reader_test=bool(body.run_reader_test),
+                    ideation_level=body.ideation_level,
                 )
             else:
                 result = run_continue_next_chapter(
@@ -695,6 +731,7 @@ def pipeline_continue(body: PipelineContinueBody):
                     writing_temp=body.writing_temperature,
                     agent_profile=ap,
                     run_reader_test=bool(body.run_reader_test),
+                    ideation_level=body.ideation_level,
                 )
         elif sp:
             prefix = safe_series_prefix(sp)
@@ -707,6 +744,9 @@ def pipeline_continue(body: PipelineContinueBody):
                 memory_context=mem_global,
                 kb_block=kb_block,
                 writing_temp=body.writing_temperature,
+                ideation_level=body.ideation_level,
+                agent_profile=ap,
+                run_reader_test=bool(body.run_reader_test),
             )
         else:
             raise HTTPException(400, "请提供 book_id（推荐）或 series_prefix（旧书库）")
@@ -787,6 +827,7 @@ def generate(body: GenerateBody):
     system = _compose_system(system, body.theme_id)
 
     user_full = _build_user_with_kb(body.user_message, body.kb_names)
+    user_full = ideation_instruction(body.ideation_level) + "\n\n---\n\n" + user_full
     if body.use_long_memory:
         mem = build_memory_context(ROOT, max_chars=body.memory_max_chars).strip()
         if mem:
@@ -829,10 +870,12 @@ def outline(body: OutlineBody):
     sys_prompt = (
         "你是中文小说策划。根据用户一句话梗概，输出简洁分章大纲（8～15 章），"
         "每章一行：「第N章：一句话要点」。不要废话，不要解释写作方法。"
+        f" {PLANNER_ORIGINALITY_CONTRACT}"
     )
     premise = body.premise.strip()
     if theme_hint:
         premise = f"{theme_hint}\n\n梗概：\n{premise}"
+    premise = f"{ideation_instruction(body.ideation_level)}\n\n{premise}"
 
     try:
         text = chat_completion(

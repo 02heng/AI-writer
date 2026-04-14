@@ -16,6 +16,8 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any, Iterator, Optional
 
+import httpx
+
 # Try importing providers
 try:
     from openai import OpenAI
@@ -124,7 +126,19 @@ class DeepSeekProvider(LLMProvider):
         if not self.api_key:
             raise ValueError("DEEPSEEK_API_KEY not configured")
 
-        self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        connect = float(os.environ.get("AIWRITER_HTTP_CONNECT_TIMEOUT", "60").strip() or "60")
+        read = float(os.environ.get("AIWRITER_HTTP_READ_TIMEOUT", "600").strip() or "600")
+        write = float(os.environ.get("AIWRITER_HTTP_WRITE_TIMEOUT", "180").strip() or "180")
+        pool = float(os.environ.get("AIWRITER_HTTP_POOL_TIMEOUT", "60").strip() or "60")
+        timeout = httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
+        max_retries = int(os.environ.get("AIWRITER_OPENAI_MAX_RETRIES", "6").strip() or "6")
+        max_retries = max(0, min(max_retries, 12))
+        self._client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
 
     @property
     def name(self) -> str:
@@ -206,7 +220,14 @@ class OpenAIProvider(LLMProvider):
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY not configured")
 
-        self._client = OpenAI(api_key=self.api_key)
+        connect = float(os.environ.get("AIWRITER_HTTP_CONNECT_TIMEOUT", "60").strip() or "60")
+        read = float(os.environ.get("AIWRITER_HTTP_READ_TIMEOUT", "600").strip() or "600")
+        write = float(os.environ.get("AIWRITER_HTTP_WRITE_TIMEOUT", "180").strip() or "180")
+        pool = float(os.environ.get("AIWRITER_HTTP_POOL_TIMEOUT", "60").strip() or "60")
+        timeout = httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
+        max_retries = int(os.environ.get("AIWRITER_OPENAI_MAX_RETRIES", "6").strip() or "6")
+        max_retries = max(0, min(max_retries, 12))
+        self._client = OpenAI(api_key=self.api_key, timeout=timeout, max_retries=max_retries)
 
     @property
     def name(self) -> str:

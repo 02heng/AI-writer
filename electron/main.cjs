@@ -4,7 +4,7 @@ const { app, BrowserWindow, session, shell, ipcMain, dialog } = require('electro
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { applyNonSystemDrivePaths } = require('./paths.cjs');
+const { applyNonSystemDrivePaths, resolveEarlyLogFile } = require('./paths.cjs');
 const { startBackend, stopBackend, getBackendBaseUrl } = require('./backend.cjs');
 
 // #region agent log
@@ -24,14 +24,22 @@ function agentLog(location, message, data, hypothesisId) {
     body: payload
   }).catch(() => {});
   try {
-    let dir;
-    try {
-      dir = app.isReady() ? app.getPath('userData') : path.join(os.tmpdir(), 'aiwriter-debug');
-    } catch {
-      dir = path.join(os.tmpdir(), 'aiwriter-debug');
+    let logFile = resolveEarlyLogFile('debug-d7648d.log');
+    if (!logFile && app.isReady()) {
+      try {
+        logFile = path.join(app.getPath('logs'), 'debug-d7648d.log');
+      } catch {
+        logFile = null;
+      }
     }
-    fs.mkdirSync(dir, { recursive: true });
-    fs.appendFileSync(path.join(dir, 'debug-d7648d.log'), payload + '\n', 'utf8');
+    if (!logFile) {
+      const dir = path.join(os.tmpdir(), 'aiwriter-debug');
+      fs.mkdirSync(dir, { recursive: true });
+      logFile = path.join(dir, 'debug-d7648d.log');
+    } else {
+      fs.mkdirSync(path.dirname(logFile), { recursive: true });
+    }
+    fs.appendFileSync(logFile, payload + '\n', 'utf8');
   } catch (_) {}
   try {
     const repoLog = path.join(__dirname, '..', 'debug-d7648d.log');

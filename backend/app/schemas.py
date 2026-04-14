@@ -75,6 +75,12 @@ BOOK_PLAN_SCHEMA: dict[str, Any] = {
                     "type": "object",
                     "description": "两阶策划宏观阶段表（phases、ending_direction 等）",
                 },
+                "ideation_level": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "description": "脑洞程度：0 极保守，0.5 正常，1 高创意",
+                },
             },
         },
         "chapters": {

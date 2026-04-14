@@ -99,3 +99,19 @@
   --scrollbar-thumb: rgba(251, 113, 133, 0.3);
   --scrollbar-thumb-hover: rgba(251, 113, 133, 0.48);
 }
+
+.ideation-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.ideation-row input[type='range'] {
+  flex: 1;
+  min-width: 0;
+}
+.ideation-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  min-width: 2.5rem;
+  text-align: right;
+}

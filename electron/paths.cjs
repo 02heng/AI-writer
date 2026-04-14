@@ -61,12 +61,14 @@ function applyNonSystemDrivePaths(app) {
   const cache = path.join(root, 'Cache');
   const downloads = path.join(root, 'Downloads');
   const logs = path.join(root, 'Logs');
+  const temp = path.join(root, 'Temp');
 
   try {
     ensureDirSync(userData);
     ensureDirSync(cache);
     ensureDirSync(downloads);
     ensureDirSync(logs);
+    ensureDirSync(temp);
   } catch (e) {
     console.error('[AI-writer] Cannot create subfolders under', root, e);
     return;
@@ -80,4 +82,23 @@ function applyNonSystemDrivePaths(app) {
   console.log('[AI-writer] Data root:', root);
 }
 
-module.exports = { resolvePreferredDataRoot, applyNonSystemDrivePaths };
+/**
+ * 主进程尽早写日志用（app.ready 之前）：与 UserData 同盘的数据根下 Logs。
+ */
+function resolveEarlyLogFile(fileName) {
+  const root = resolvePreferredDataRoot();
+  if (!root) return null;
+  try {
+    const logs = path.join(root, 'Logs');
+    ensureDirSync(logs);
+    return path.join(logs, fileName);
+  } catch {
+    return null;
+  }
+}
+
+module.exports = {
+  resolvePreferredDataRoot,
+  applyNonSystemDrivePaths,
+  resolveEarlyLogFile
+};

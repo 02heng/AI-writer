@@ -137,6 +137,16 @@ function startBackend({ userDataPath, projectRoot }) {
       env.AIWRITER_BOOKS_ROOT = booksRoot;
     }
 
+    // Python / SQLite / Chroma 等使用 TEMP：放到与 UserData 同盘，减少写 C:\Users\...\AppData\Local\Temp
+    try {
+      const runtimeTemp = path.join(userDataPath, '.runtime-temp');
+      fs.mkdirSync(runtimeTemp, { recursive: true });
+      env.TEMP = runtimeTemp;
+      env.TMP = runtimeTemp;
+    } catch (e) {
+      console.warn('[backend] Could not set TEMP to userData/.runtime-temp:', e.message || e);
+    }
+
     try {
       backendProcess = spawn(cmd, args, {
         cwd: backendDir,

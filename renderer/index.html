@@ -100,6 +100,16 @@
                   <p id="theme-desc" class="theme-blurb"></p>
                 </div>
                 <div class="form-col-span2">
+                  <label class="lbl" for="ideation-level">脑洞程度（0～1，0.5 为正常）</label>
+                  <div class="ideation-row">
+                    <input type="range" id="ideation-level" min="0" max="1" step="0.05" value="0.5" />
+                    <span id="ideation-level-value" class="ideation-value">0.50</span>
+                  </div>
+                  <p class="rail-hint" style="margin-top: 0.35rem">
+                    越接近 1，策划与正文越鼓励非常规创意与反套路推演，但仍要求故事内部因果自洽。
+                  </p>
+                </div>
+                <div class="form-col-span2">
                   <label class="lbl lbl-strong" for="solo-title">题目 / 书名 / 灵感</label>
                   <input type="text" id="solo-title" class="inp" maxlength="200" placeholder="例如：锈蚀之星、夜班便利店员看见龙" />
                 </div>
@@ -135,6 +145,16 @@
                     placeholder="留空=与本轮相同"
                   />
                 </div>
+                <div class="form-col-span2">
+                  <label class="lbl" for="solo-book-note">全书项目说明（可选）</label>
+                  <textarea
+                    id="solo-book-note"
+                    class="inp"
+                    rows="4"
+                    maxlength="8000"
+                    placeholder="可写你对整部书的立意、气质、想强调的主题或禁忌等；会参与策划、写入本书记忆宫殿，并在每章写作时注入。"
+                  ></textarea>
+                </div>
                 <div>
                   <label class="lbl" for="pipeline-agent-profile">编排模式</label>
                   <select id="pipeline-agent-profile" class="inp inp-select">
@@ -157,7 +177,7 @@
                   <p class="rail-hint">
                     快速模式约「章数 + 策划分批 + 开笔备案 1 次」次 API；完整模式每章多次调用。超过 20
                     章会分批策划；一键最多 1500 章，耗时可极长、费用高。若填写「预定总章数」大于本轮，将先跑宏观阶段表再写本轮分章要点，并写入
-                    plan.json。开笔前会自动写入记忆宫殿四类长程约束。
+                    plan.json。开笔前会自动写入记忆宫殿四类长程约束。每本书会随机生成本书「虚拟作者」人设并写入记忆宫殿，续写时沿用同一叙事滤光。
                   </p>
                 </div>
                 <div class="form-actions">
@@ -177,7 +197,7 @@
 
               <h3 class="sub-block-title">续写下一章</h3>
               <p class="rail-hint">
-                优先选择「书本」（新库）；仍支持旧版 <span class="inline-code">out/</span> 前缀书系。续写沿用上方题材与编排模式。
+                优先选择「书本」（新库）；仍支持旧版 <span class="inline-code">out/</span> 前缀书系。题材沿用上方「只写题目」区；编排模式可在下方单独选择（与一键新书互不绑定）。
                 书本模式单次最多续写 500 章（逐章生成，耗时可很长）。
               </p>
               <div class="form-grid">
@@ -190,6 +210,20 @@
                 <div>
                   <label class="lbl" for="continue-chapter-count">续写章数（仅书本）</label>
                   <input type="number" id="continue-chapter-count" class="inp" min="1" max="500" value="1" />
+                </div>
+                <div>
+                  <label class="lbl" for="continue-agent-profile">续写编排模式</label>
+                  <select id="continue-agent-profile" class="inp inp-select">
+                    <option value="fast" selected>快速（单写作智能体）</option>
+                    <option value="full">完整（Character / Lore / Editor / Safety 链）</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="lbl" for="continue-reader-test">&nbsp;</label>
+                  <label class="chk-row chk-row--tight" style="margin: 0; padding-top: 0.35rem">
+                    <input type="checkbox" id="continue-reader-test" />
+                    <span>每章追加盲测读者（仅 full，额外 API）</span>
+                  </label>
                 </div>
                 <div class="form-actions">
                   <button type="button" class="btn btn-secondary" id="btn-refresh-series">刷新列表</button>
@@ -376,6 +410,7 @@
           <section class="reader-pane surface">
             <header class="reader-pane-head">
               <div class="reader-actions-row">
+                <button type="button" class="btn btn-secondary" id="reader-copy-chapter" hidden>复制本章</button>
                 <button type="button" class="btn btn-secondary" id="reader-export-txt" hidden>导出整本 TXT</button>
                 <button type="button" class="btn btn-ghost reader-danger" id="reader-delete-book" hidden>移入回收站</button>
               </div>

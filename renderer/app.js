@@ -147,7 +147,13 @@ const FALLBACK_THEMES = [
   { id: 'fantasy', label: '魔幻 / 西幻', description: '魔法与冒险。', system_addon: '' },
   { id: 'scifi', label: '科幻', description: '技术与社会推演。', system_addon: '' },
   { id: 'xianxia', label: '仙侠 / 修真', description: '东方修炼体系。', system_addon: '' },
-  { id: 'horror', label: '悬疑 / 惊悚', description: '悬念与氛围。', system_addon: '' }
+  { id: 'horror', label: '悬疑 / 惊悚', description: '悬念与氛围。', system_addon: '' },
+  {
+    id: 'ancient_romance',
+    label: '古代言情',
+    description: '古代背景下的情感与人物命运。',
+    system_addon: ''
+  }
 ];
 
 function selectedKbFiles() {
@@ -157,6 +163,8 @@ function selectedKbFiles() {
 let libraryActiveName = '';
 let readerBookId = '';
 let readerChapterN = 0;
+/** 当前阅读区正文的原始 Markdown（用于复制本章） */
+let readerChapterRaw = '';
 let readerToc = [];
 let readerChapterNs = [];
 let readerTocTotal = 0;
@@ -180,6 +188,26 @@ function initUiTheme() {
     document.documentElement.dataset.theme = v;
     localStorage.setItem(THEME_KEY, v);
   });
+}
+
+/** 脑洞程度 0～1，默认 0.5；与后端 Pipeline / 手动生成 / 大纲一致 */
+function readIdeationLevel() {
+  const el = document.getElementById('ideation-level');
+  if (!el) return 0.5;
+  const v = parseFloat(String(el.value));
+  if (!Number.isFinite(v)) return 0.5;
+  return Math.min(1, Math.max(0, v));
+}
+
+function initIdeationSlider() {
+  const range = document.getElementById('ideation-level');
+  const valEl = document.getElementById('ideation-level-value');
+  const sync = () => {
+    if (valEl) valEl.textContent = readIdeationLevel().toFixed(2);
+  };
+  sync();
+  range?.addEventListener('input', sync);
+  range?.addEventListener('change', sync);
 }
 
 function formatFileMeta(mtime, size) {
@@ -227,9 +255,12 @@ function updateReaderNav() {
   if (next) next.disabled = !hasCh || readerChapterN >= maxN;
   const exp = document.getElementById('reader-export-txt');
   const del = document.getElementById('reader-delete-book');
+  const copyB = document.getElementById('reader-copy-chapter');
   const showActs = Boolean(readerBookId) && nums.length > 0;
   if (exp) exp.hidden = !showActs;
   if (del) del.hidden = !showActs;
+  const canCopy = Boolean(String(readerChapterRaw || '').trim());
+  if (copyB) copyB.hidden = !canCopy;
 }
 
 function scrollReaderToTop() {
@@ -244,6 +275,44 @@ function formatEta(ms) {
   const m = Math.floor(s / 60);
   const r = s % 60;
   return `约 ${m} 分 ${r} 秒`;
+}
+
+/** 复制用：去掉 **加粗** 及残留星号（模型常把对白写成 **「…」**） */
+function stripMarkdownEmphasisForCopy(raw) {
+  let s = String(raw);
+  for (let i = 0; i < 48; i++) {
+    const next = s.replace(/\*\*([\s\S]*?)\*\*/g, (_, inner) => inner);
+    if (next === s) break;
+    s = next;
+  }
+  s = s.replace(/\*{2,}/g, '');
+  return s;
+}
+
+async function copyReaderTextToClipboard() {
+  const text = stripMarkdownEmphasisForCopy(String(readerChapterRaw || '').trim());
+  if (!text) {
+    void showAppAlert('当前没有已加载的正文可复制。', '复制本章');
+    return;
+  }
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    void showAppAlert('本章正文已复制到剪贴板。', '复制本章');
+  } catch (e) {
+    void showAppAlert(e?.message || String(e), '复制失败');
+  }
 }
 
 async function openBookChapter(bookId, chapterN) {
@@ -263,13 +332,16 @@ async function openBookChapter(bookId, chapterN) {
     const sub = (data.title && String(data.title).trim()) || '';
     titleEl.textContent = sub ? `第 ${chapterN} 章 · ${sub}` : `第 ${chapterN} 章`;
     metaEl.textContent = `${data.content.length} 字`;
+    readerChapterRaw = typeof data.content === 'string' ? data.content : '';
     renderReaderMarkdown(data.content);
     updateReaderNav();
     scrollReaderToTop();
   } catch (e) {
+    readerChapterRaw = '';
     metaEl.textContent = '';
     titleEl.textContent = '读取失败';
     document.getElementById('reader-content').innerHTML = `<p class="rail-hint">${escapeHtml(e.message)}</p>`;
+    updateReaderNav();
   }
 }
 
@@ -325,6 +397,7 @@ async function loadMoreChapters() {
 
 async function selectReaderBook(bookId, titleLabel) {
   readerBookId = bookId;
+  readerChapterRaw = '';
   readerChapterN = 0;
   readerToc = [];
   readerChapterNs = [];
@@ -460,6 +533,7 @@ async function openLegacyLibraryFile(name) {
   if (!contentEl) return;
   libraryActiveName = name;
   readerBookId = '';
+  readerChapterRaw = '';
   readerChapterN = 0;
   readerToc = [];
   readerChapterNs = [];
@@ -492,11 +566,15 @@ async function openLegacyLibraryFile(name) {
     // #endregion
     const data = await fetchJson(`/api/library/read?name=${encodeURIComponent(name)}`);
     metaEl.textContent = `${data.content.length} 字`;
+    readerChapterRaw = typeof data.content === 'string' ? data.content : '';
     renderReaderMarkdown(data.content);
+    updateReaderNav();
   } catch (e) {
+    readerChapterRaw = '';
     metaEl.textContent = '';
     titleEl.textContent = '读取失败';
     contentEl.innerHTML = `<p class="rail-hint">${escapeHtml(e.message)}</p>`;
+    updateReaderNav();
   }
 }
 
@@ -873,6 +951,7 @@ async function refreshMemList() {
 
 document.addEventListener('DOMContentLoaded', async () => {
   initUiTheme();
+  initIdeationSlider();
   initTabs();
 
   document.getElementById('btn-library-refresh')?.addEventListener('click', () => {
@@ -1046,9 +1125,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       logEl.textContent = '流式进度见上方进度条；完成后此处显示摘要。\n';
     }
     if (gs) gs.textContent = '一键流水线运行中…';
+    const bookNote = document.getElementById('solo-book-note')?.value?.trim();
     const payload = {
       title,
       theme_id: document.getElementById('theme-id')?.value,
+      ideation_level: readIdeationLevel(),
       max_chapters: maxChapters,
       length_scale: lengthScale,
       protagonist_gender: protagonistGender,
@@ -1057,6 +1138,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       agent_profile: document.getElementById('pipeline-agent-profile')?.value || 'fast',
       run_reader_test: document.getElementById('pipeline-reader-test')?.checked ?? false
     };
+    if (bookNote) {
+      payload.user_book_note = bookNote;
+    }
     if (plannedTotalChapters !== undefined) {
       payload.planned_total_chapters = plannedTotalChapters;
     }
@@ -1139,6 +1223,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         '已保存章节：',
         ...(data.saved_files || [])
       ];
+      if (data.virtual_author) {
+        const a = data.virtual_author;
+        lines.push(
+          '',
+          '本书虚拟作者（叙事滤光，已写入记忆宫殿）：',
+          `${a.gender || ''}，${a.age != null ? `${a.age}岁` : ''}，${a.city || ''}，${a.profession || ''}`,
+          String(a.card || '').slice(0, 1200)
+        );
+      }
+      if (data.user_book_note) {
+        const u = String(data.user_book_note);
+        lines.push('', '全书项目说明（摘要）：', u.length > 600 ? `${u.slice(0, 600)}…` : u);
+      }
       if (logEl) logEl.textContent = lines.join('\n');
       if (progBar) progBar.style.width = '100%';
       if (progLabel) progLabel.textContent = '已完成';
@@ -1170,16 +1267,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (btn) btn.disabled = true;
     if (logEl) {
       logEl.hidden = false;
-      logEl.textContent = '续写中：先生成章要点，再写正文（2 次 API）…\n';
+      const cap = document.getElementById('continue-agent-profile')?.value || 'fast';
+      const hint =
+        cap === 'full'
+          ? '续写中：要点/标题（如需）→ 完整多智能体链（每章多次 API）…\n'
+          : '续写中：先生成章要点，再写正文（约 2 次 API）…\n';
+      logEl.textContent = hint;
     }
     if (gs) gs.textContent = '续写进行中…';
     try {
       const basePayload = {
         theme_id: document.getElementById('theme-id')?.value,
+        ideation_level: readIdeationLevel(),
         use_long_memory: document.getElementById('cb-continue-memory')?.checked ?? true,
         kb_names: selectedKbFiles(),
-        agent_profile: document.getElementById('pipeline-agent-profile')?.value || 'fast',
-        run_reader_test: document.getElementById('pipeline-reader-test')?.checked ?? false
+        agent_profile: document.getElementById('continue-agent-profile')?.value || 'fast',
+        run_reader_test: document.getElementById('continue-reader-test')?.checked ?? false
       };
       const MAX_CONTINUE_CHAPTERS = 500;
       const cc = parseInt(String(document.getElementById('continue-chapter-count')?.value || '1'), 10);
@@ -1191,8 +1294,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         payload.book_id = raw.slice(5);
       } else if (raw.startsWith('legacy:')) {
         payload.series_prefix = raw.slice(7);
-        delete payload.agent_profile;
-        delete payload.run_reader_test;
         delete payload.chapter_count;
       } else {
         void showAppAlert('选择项格式无效，请刷新列表后重选。', '选择无效');
@@ -1243,6 +1344,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     } finally {
       btn.disabled = false;
     }
+  });
+
+  document.getElementById('reader-copy-chapter')?.addEventListener('click', () => {
+    void copyReaderTextToClipboard();
   });
 
   document.getElementById('reader-export-txt')?.addEventListener('click', async () => {
@@ -1333,6 +1438,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('reader-doc-title').textContent = '选择书本与章节';
       document.getElementById('reader-meta').textContent = '';
       document.getElementById('reader-chapter-nav').hidden = true;
+      readerChapterRaw = '';
+      document.getElementById('reader-copy-chapter').hidden = true;
       document.getElementById('reader-export-txt').hidden = true;
       document.getElementById('reader-delete-book').hidden = true;
       document.getElementById('chapter-list').innerHTML = '';
@@ -1356,7 +1463,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         body: JSON.stringify({
           premise,
           temperature: 0.7,
-          theme_id: document.getElementById('theme-id').value
+          theme_id: document.getElementById('theme-id').value,
+          ideation_level: readIdeationLevel()
         })
       });
       pre.textContent = data.text || '';
@@ -1385,6 +1493,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           temperature: 0.8,
           stream: false,
           theme_id: document.getElementById('theme-id').value,
+          ideation_level: readIdeationLevel(),
           use_long_memory: document.getElementById('cb-long-memory').checked,
           memory_max_chars: 4500
         })
