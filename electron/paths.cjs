@@ -97,8 +97,112 @@ function resolveEarlyLogFile(fileName) {
   }
 }
 
+/**
+ * 每日页面快照目录：优先 D:/E: 数据根下 Snapshots；否则在 Windows 上若 D: 存在则用 D:\\AI-writer-data\\Snapshots。
+ * @param {import('electron').App | null} app — 若无可写数据盘时，用 app.getPath('userData')/Snapshots（可能仍在 D 盘 UserData 下）
+ */
+function resolveSnapshotRoot(app) {
+  const root = resolvePreferredDataRoot();
+  if (root) {
+    const p = path.join(root, 'Snapshots');
+    try {
+      ensureDirSync(p);
+      return p;
+    } catch {
+      // fall through
+    }
+  }
+  if (process.platform === 'win32') {
+    try {
+      if (fs.existsSync('D:\\')) {
+        const base = path.join('D:', 'AI-writer-data');
+        const p = path.join(base, 'Snapshots');
+        ensureDirSync(base);
+        ensureDirSync(p);
+        return p;
+      }
+    } catch {
+      // fall through
+    }
+  }
+  if (app && typeof app.getPath === 'function') {
+    const fallback = path.join(app.getPath('userData'), 'Snapshots');
+    try {
+      ensureDirSync(fallback);
+      return fallback;
+    } catch {
+      return fallback;
+    }
+  }
+  return null;
+}
+
+/**
+ * 分析/审核/指标根目录：与 UserData 同级 D:\\AI-writer-data\\Analytics。
+ * 环境变量 AIWRITER_ANALYTICS_ROOT 可覆盖（与后端 paths.analytics_root 对齐）。
+ */
+function resolveAnalyticsRoot(app) {
+  const env = process.env.AIWRITER_ANALYTICS_ROOT;
+  if (env && String(env).trim()) {
+    const p = path.resolve(String(env).trim());
+    try {
+      ensureDirSync(p);
+      ensureDirSync(path.join(p, 'reviews'));
+      ensureDirSync(path.join(p, 'metrics'));
+      ensureDirSync(path.join(p, 'state'));
+      return p;
+    } catch {
+      return null;
+    }
+  }
+  const root = resolvePreferredDataRoot();
+  if (root) {
+    const p = path.join(root, 'Analytics');
+    try {
+      ensureDirSync(p);
+      ensureDirSync(path.join(p, 'reviews'));
+      ensureDirSync(path.join(p, 'metrics'));
+      ensureDirSync(path.join(p, 'state'));
+      return p;
+    } catch {
+      // fall through
+    }
+  }
+  if (process.platform === 'win32') {
+    try {
+      if (fs.existsSync('D:\\')) {
+        const base = path.join('D:', 'AI-writer-data');
+        const p = path.join(base, 'Analytics');
+        ensureDirSync(base);
+        ensureDirSync(p);
+        ensureDirSync(path.join(p, 'reviews'));
+        ensureDirSync(path.join(p, 'metrics'));
+        ensureDirSync(path.join(p, 'state'));
+        return p;
+      }
+    } catch {
+      // fall through
+    }
+  }
+  if (app && typeof app.getPath === 'function') {
+    const fallback = path.join(app.getPath('userData'), 'Analytics');
+    try {
+      ensureDirSync(fallback);
+      ensureDirSync(path.join(fallback, 'reviews'));
+      ensureDirSync(path.join(fallback, 'metrics'));
+      ensureDirSync(path.join(fallback, 'state'));
+      return fallback;
+    } catch {
+      return fallback;
+    }
+  }
+  return null;
+}
+
 module.exports = {
   resolvePreferredDataRoot,
   applyNonSystemDrivePaths,
-  resolveEarlyLogFile
+  resolveEarlyLogFile,
+  resolveSnapshotRoot,
+  resolveAnalyticsRoot
 };

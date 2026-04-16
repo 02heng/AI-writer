@@ -402,6 +402,13 @@ async function selectReaderBook(bookId, titleLabel) {
   readerToc = [];
   readerChapterNs = [];
   readerTocTotal = 0;
+  // 书库所选书本与「写作 · 记忆范围」未联动时，用户易误以为在改本书记忆却在改全局。
+  const memSel = document.getElementById('mem-scope-book');
+  if (memSel && bookId && Array.from(memSel.options).some((op) => op.value === bookId)) {
+    memSel.value = bookId;
+    void refreshRollup();
+    void refreshMemList();
+  }
   const chBox = document.getElementById('chapter-list');
   const hintEl = document.getElementById('reader-book-hint');
   const chFilter = document.getElementById('chapter-list-filter');
@@ -703,10 +710,206 @@ async function refreshMemBookOptions() {
   if (cur && Array.from(sel.options).some((op) => op.value === cur)) sel.value = cur;
 }
 
+async function populateAnalyticsSupervisorBooks() {
+  const sel = document.getElementById('analytics-supervisor-book');
+  if (!sel) return;
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">— 选择书本 —</option>';
+  try {
+    let offset = 0;
+    const lim = 400;
+    let total = Infinity;
+    while (offset < total) {
+      const data = await fetchJson(`/api/books?limit=${lim}&offset=${offset}&q=`);
+      total = data.total ?? 0;
+      for (const b of data.books || []) {
+        const o = document.createElement('option');
+        o.value = b.id;
+        o.textContent = `${b.title || b.id} · ${b.chapter_count ?? 0} 章`;
+        sel.appendChild(o);
+      }
+      offset += (data.books || []).length;
+      if (!(data.books || []).length) break;
+    }
+  } catch (e) {
+    console.warn('analytics supervisor books', e);
+  }
+  if (cur && Array.from(sel.options).some((op) => op.value === cur)) sel.value = cur;
+}
+
+function showAnalyticsSupervisorPayload(payload) {
+  const titleEl = document.getElementById('analytics-preview-title');
+  const metaEl = document.getElementById('analytics-preview-meta');
+  const preview = document.getElementById('analytics-preview');
+  if (!preview) return;
+  if (titleEl) titleEl.textContent = '书本监督结果';
+  if (metaEl) {
+    if (payload?.saved?.rel_path) metaEl.textContent = `已保存：${payload.saved.rel_path}`;
+    else if (payload?.metaLine) metaEl.textContent = payload.metaLine;
+    else metaEl.textContent = '';
+  }
+  preview.innerHTML = '';
+  if (payload?.integrity) {
+    const h = document.createElement('h4');
+    h.className = 'analytics-supervisor__sub';
+    h.textContent = '完整性报告';
+    preview.appendChild(h);
+    const preI = document.createElement('pre');
+    preI.className = 'analytics-json';
+    preI.textContent = JSON.stringify(payload.integrity, null, 2);
+    preview.appendChild(preI);
+  }
+  if (payload?.meta_review) {
+    const h2 = document.createElement('h4');
+    h2.className = 'analytics-supervisor__sub';
+    h2.textContent = '元审查（监督智能体）';
+    preview.appendChild(h2);
+    const preM = document.createElement('pre');
+    preM.className = 'analytics-json';
+    preM.textContent = JSON.stringify(payload.meta_review, null, 2);
+    preview.appendChild(preM);
+  }
+  if (!payload?.integrity && !payload?.meta_review) {
+    preview.innerHTML = '<p class="rail-hint">无数据</p>';
+  }
+}
+
+async function refreshAnalyticsFileListOnly() {
+  const sectionsEl = document.getElementById('analytics-sections');
+  if (!sectionsEl) return;
+  try {
+    const data = await fetchJson('/api/analytics/list');
+    renderAnalyticsSections(data);
+  } catch (e) {
+    console.warn('analytics list refresh', e);
+  }
+}
+
+async function refreshAnalyticsPanel() {
+  const hint = document.getElementById('analytics-paths-hint');
+  const sectionsEl = document.getElementById('analytics-sections');
+  const titleEl = document.getElementById('analytics-preview-title');
+  const metaEl = document.getElementById('analytics-preview-meta');
+  const preview = document.getElementById('analytics-preview');
+  if (!sectionsEl || !preview) return;
+  await populateAnalyticsSupervisorBooks();
+  try {
+    const info = await fetchJson('/api/analytics/info');
+    if (hint) {
+      hint.textContent = `分析根目录：${info.analytics_root}\n快照库：${info.snapshots_dir}`;
+    }
+    const data = await fetchJson('/api/analytics/list');
+    renderAnalyticsSections(data);
+    if (titleEl) titleEl.textContent = '选择左侧文件';
+    if (metaEl) metaEl.textContent = '';
+    preview.innerHTML =
+      '<p class="rail-hint">点击列表中的 Markdown、JSON、JSONL 或截图即可预览。</p>';
+  } catch (e) {
+    sectionsEl.innerHTML = '';
+    if (hint) hint.textContent = `加载失败：${e?.message || e}`;
+  }
+}
+
+function renderAnalyticsSections(data) {
+  const sectionsEl = document.getElementById('analytics-sections');
+  if (!sectionsEl) return;
+  sectionsEl.innerHTML = '';
+  for (const sec of data.sections || []) {
+    const wrap = document.createElement('div');
+    wrap.className = 'analytics-section';
+    const h = document.createElement('h3');
+    h.className = 'analytics-section-title';
+    h.textContent = sec.title;
+    wrap.appendChild(h);
+    const list = document.createElement('div');
+    list.className = 'analytics-file-list';
+    const items = sec.items || [];
+    if (!items.length) {
+      const empty = document.createElement('p');
+      empty.className = 'rail-hint';
+      empty.textContent = '暂无条目';
+      list.appendChild(empty);
+    } else {
+      for (const it of items) {
+        if (it.is_dir) {
+          const row = document.createElement('div');
+          row.className = 'analytics-dir-label';
+          row.textContent = `· ${it.name}`;
+          list.appendChild(row);
+          continue;
+        }
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'analytics-file-item';
+        const kb = it.size != null && it.size > 0 ? ` · ${(it.size / 1024).toFixed(1)} KB` : '';
+        btn.textContent = `${it.name}${kb}`;
+        btn.dataset.rel = it.rel_path;
+        btn.addEventListener('click', () => {
+          void loadAnalyticsPreview(it.rel_path, it);
+        });
+        list.appendChild(btn);
+      }
+    }
+    wrap.appendChild(list);
+    sectionsEl.appendChild(wrap);
+  }
+}
+
+async function loadAnalyticsPreview(relPath, meta) {
+  const titleEl = document.getElementById('analytics-preview-title');
+  const metaEl = document.getElementById('analytics-preview-meta');
+  const preview = document.getElementById('analytics-preview');
+  if (!preview || !relPath) return;
+  if (titleEl) titleEl.textContent = meta?.name || relPath;
+  const name = (meta?.name || relPath).toLowerCase();
+  const isImg =
+    name.endsWith('.png') ||
+    name.endsWith('.jpg') ||
+    name.endsWith('.jpeg') ||
+    name.endsWith('.webp') ||
+    name.endsWith('.gif');
+  if (isImg) {
+    const base = await apiBase();
+    const url = joinBackendUrl(base, `/api/analytics/raw?rel=${encodeURIComponent(relPath)}`);
+    if (metaEl) metaEl.textContent = relPath;
+    preview.innerHTML = '';
+    const img = document.createElement('img');
+    img.className = 'analytics-preview-img';
+    img.src = url;
+    img.alt = relPath;
+    preview.appendChild(img);
+    return;
+  }
+  if (metaEl) metaEl.textContent = relPath;
+  preview.innerHTML = '<p class="rail-hint">加载中…</p>';
+  try {
+    const res = await fetchJson(`/api/analytics/file?rel=${encodeURIComponent(relPath)}`);
+    preview.innerHTML = '';
+    if (res.kind === 'json') {
+      const pre = document.createElement('pre');
+      pre.className = 'analytics-json';
+      pre.textContent = JSON.stringify(res.data, null, 2);
+      preview.appendChild(pre);
+    } else {
+      const pre = document.createElement('pre');
+      pre.className = 'analytics-text';
+      pre.textContent = res.content || '';
+      preview.appendChild(pre);
+    }
+  } catch (e) {
+    preview.innerHTML = '';
+    const p = document.createElement('p');
+    p.className = 'rail-hint';
+    p.textContent = e?.message || String(e);
+    preview.appendChild(p);
+  }
+}
+
 function initTabs() {
   const tabs = document.querySelectorAll('.view-tab');
   const writePanel = document.getElementById('panel-write');
   const readPanel = document.getElementById('panel-read');
+  const analyticsPanel = document.getElementById('panel-analytics');
   tabs.forEach((tab) => {
     tab.addEventListener('click', () => {
       const panelId = tab.dataset.panel;
@@ -717,8 +920,12 @@ function initTabs() {
       });
       writePanel?.classList.toggle('is-active', panelId === 'write');
       readPanel?.classList.toggle('is-active', panelId === 'read');
+      analyticsPanel?.classList.toggle('is-active', panelId === 'analytics');
       if (panelId === 'read') {
         refreshReaderShell();
+      }
+      if (panelId === 'analytics') {
+        void refreshAnalyticsPanel();
       }
     });
   });
@@ -793,7 +1000,10 @@ async function refreshHealth() {
     if (pathsEl && h.books_root) {
       const base = (pathsEl.dataset.basePaths || pathsEl.textContent || '').split('\n\n书本目录')[0].trim();
       pathsEl.dataset.basePaths = base;
-      pathsEl.textContent = `${base}\n\n书本目录：\n${h.books_root}`;
+      let extra = `\n\n书本目录：\n${h.books_root}`;
+      if (h.analytics_root) extra += `\n\n分析目录：\n${h.analytics_root}`;
+      if (h.snapshots_dir) extra += `\n\n快照目录：\n${h.snapshots_dir}`;
+      pathsEl.textContent = `${base}${extra}`;
     }
     return h;
   } catch (e) {
@@ -954,6 +1164,61 @@ document.addEventListener('DOMContentLoaded', async () => {
   initIdeationSlider();
   initTabs();
 
+  document.getElementById('btn-analytics-refresh')?.addEventListener('click', () => {
+    void refreshAnalyticsPanel();
+  });
+
+  document.getElementById('btn-analytics-supervisor-report')?.addEventListener('click', async () => {
+    const bid = document.getElementById('analytics-supervisor-book')?.value?.trim();
+    const st = document.getElementById('analytics-supervisor-status');
+    if (!bid) {
+      void showAppAlert('请先在列表中选择一本书。', '书本监督');
+      return;
+    }
+    if (st) st.textContent = '正在拉取完整性报告…';
+    try {
+      const rep = await fetchJson(`/api/books/${encodeURIComponent(bid)}/supervisor/report`);
+      showAnalyticsSupervisorPayload({ integrity: rep, meta_review: null, metaLine: `书本 ${bid}` });
+      if (st) {
+        st.textContent = rep?.integrity_ok
+          ? '结构检查通过（无策划缺章与序号空洞）'
+          : `已生成报告：${(rep?.warnings || []).length} 条提示，请看右侧`;
+      }
+    } catch (e) {
+      if (st) st.textContent = '';
+      void showAppAlert(e?.message || String(e), '完整性报告失败');
+    }
+  });
+
+  document.getElementById('btn-analytics-supervisor-review')?.addEventListener('click', async () => {
+    const bid = document.getElementById('analytics-supervisor-book')?.value?.trim();
+    const st = document.getElementById('analytics-supervisor-status');
+    const save = Boolean(document.getElementById('cb-analytics-supervisor-save')?.checked);
+    if (!bid) {
+      void showAppAlert('请先在列表中选择一本书。', '书本监督');
+      return;
+    }
+    if (st) st.textContent = '监督审查中（调用模型）…';
+    try {
+      const r = await fetchJson(`/api/books/${encodeURIComponent(bid)}/supervisor/review`, {
+        method: 'POST',
+        body: JSON.stringify({ max_run_lines: 40, save_to_analytics: save })
+      });
+      showAnalyticsSupervisorPayload({ ...r, metaLine: `书本 ${bid}` });
+      if (st) {
+        st.textContent = r?.saved?.rel_path
+          ? `已写入 ${r.saved.rel_path}`
+          : save
+            ? '完成（应已保存，若目录不可写请见报错）'
+            : '完成（未勾选保存则未写入 reviews）';
+      }
+      if (r?.saved?.rel_path) await refreshAnalyticsFileListOnly();
+    } catch (e) {
+      if (st) st.textContent = '';
+      void showAppAlert(e?.message || String(e), '监督审查失败');
+    }
+  });
+
   document.getElementById('btn-library-refresh')?.addEventListener('click', () => {
     refreshReaderShell();
   });
@@ -1025,7 +1290,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       const p = await window.aiWriter.getPaths();
       pathsEl.hidden = false;
       pathsEl.classList.remove('is-hidden');
-      pathsEl.textContent = `UserData:\n${p.userData}\n下载:\n${p.downloads}`;
+      let t = `UserData:\n${p.userData}\n下载:\n${p.downloads}`;
+      if (p.snapshotRoot) t += `\n快照目录:\n${p.snapshotRoot}`;
+      if (p.analyticsRoot) t += `\n分析目录:\n${p.analyticsRoot}`;
+      pathsEl.textContent = t;
     } catch (e) {
       console.error(e);
     }
@@ -1037,7 +1305,34 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('model-id').value = s.deepseekModel || 'deepseek-chat';
     const br = document.getElementById('books-root-path');
     if (br) br.value = s.booksRoot || '';
+    const snapCb = document.getElementById('cb-snapshot-agent');
+    if (snapCb) snapCb.checked = Boolean(s.snapshotAgentEnabled);
+    const snapUrl = document.getElementById('snapshot-page-url');
+    if (snapUrl) snapUrl.value = s.snapshotPageUrl || '';
+    const selTa = document.getElementById('metrics-dom-selectors');
+    if (selTa) {
+      try {
+        selTa.value = JSON.stringify(s.metricsDomSelectors || [], null, 2);
+      } catch {
+        selTa.value = '[]';
+      }
+    }
   }
+
+  async function refreshSnapshotRailHint() {
+    const el = document.getElementById('snapshot-rail-hint');
+    if (!el || !window.aiWriter?.getSnapshotInfo) return;
+    try {
+      const info = await window.aiWriter.getSnapshotInfo();
+      const logPath = info.metricsDomJsonl || info.snapshotRoot || '（未解析到路径）';
+      const slots = (info.todaySlots || []).join(', ') || '无';
+      const n = info.metricsDomSelectorCount ?? 0;
+      el.textContent = `DOM 记录: ${logPath} · 自定义选择器 ${n} 条 · 今日已跑: ${slots}`;
+    } catch {
+      el.textContent = '';
+    }
+  }
+  await refreshSnapshotRailHint();
 
   document.getElementById('btn-pick-books-dir')?.addEventListener('click', async () => {
     // #region agent log
@@ -1136,7 +1431,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       use_long_memory: document.getElementById('cb-pipeline-memory')?.checked ?? true,
       kb_names: selectedKbFiles(),
       agent_profile: document.getElementById('pipeline-agent-profile')?.value || 'fast',
-      run_reader_test: document.getElementById('pipeline-reader-test')?.checked ?? false
+      run_reader_test: document.getElementById('pipeline-reader-test')?.checked ?? false,
+      live_supervisor: document.getElementById('pipeline-live-supervisor')?.checked ?? false,
+      final_supervisor: document.getElementById('pipeline-final-supervisor')?.checked ?? false,
+      foreshadowing_sync_after_chapter: document.getElementById('pipeline-foreshadow-sync')?.checked ?? false,
+      memory_episodic_keep_last: (() => {
+        const v = parseInt(String(document.getElementById('pipeline-episodic-keep')?.value || '0'), 10);
+        if (!Number.isFinite(v) || v <= 0) return null;
+        return Math.min(500, v);
+      })()
     };
     if (bookNote) {
       payload.user_book_note = bookNote;
@@ -1203,6 +1506,16 @@ document.addEventListener('DOMContentLoaded', async () => {
             progBar.style.width = `${pct}%`;
             if (progEta) progEta.textContent = '';
           }
+          if (ev.event === 'supervisor_chapter' && logEl) {
+            const sum = ev.review?.summary || ev.error || '';
+            const line = `[监督·第${ev.index}章] ${sum}\n`;
+            logEl.textContent += line;
+          }
+          if (ev.event === 'supervisor_final' && logEl) {
+            const mr = ev.meta_review;
+            const sum = mr?.summary || ev.error || '';
+            logEl.textContent += `[监督·全书] ${sum}\n`;
+          }
           if (ev.event === 'done') {
             data = ev.result;
           }
@@ -1235,6 +1548,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (data.user_book_note) {
         const u = String(data.user_book_note);
         lines.push('', '全书项目说明（摘要）：', u.length > 600 ? `${u.slice(0, 600)}…` : u);
+      }
+      const sf = data.supervisor_final;
+      if (sf && !sf.error && sf.meta_review) {
+        const mr = sf.meta_review;
+        lines.push('', '—— 总监督（元审查）——', `健康分：${mr.health_score ?? '—'}`, `总评：${mr.summary || ''}`);
+        const hints = mr.prompt_iteration_hints;
+        if (Array.isArray(hints) && hints.length) {
+          lines.push('提示词/迭代方向：', ...hints.map((h) => `  · ${h}`));
+        }
+      } else if (sf && sf.error) {
+        lines.push('', '总监督未完成：', sf.error);
       }
       if (logEl) logEl.textContent = lines.join('\n');
       if (progBar) progBar.style.width = '100%';
@@ -1282,7 +1606,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         use_long_memory: document.getElementById('cb-continue-memory')?.checked ?? true,
         kb_names: selectedKbFiles(),
         agent_profile: document.getElementById('continue-agent-profile')?.value || 'fast',
-        run_reader_test: document.getElementById('continue-reader-test')?.checked ?? false
+        run_reader_test: document.getElementById('continue-reader-test')?.checked ?? false,
+        live_supervisor: document.getElementById('continue-live-supervisor')?.checked ?? false,
+        final_supervisor: document.getElementById('continue-final-supervisor')?.checked ?? false,
+        continuation_arc_plan: document.getElementById('continue-arc-plan')?.checked ?? true,
+        foreshadowing_sync_after_chapter: document.getElementById('continue-foreshadow-sync')?.checked ?? true,
+        memory_episodic_keep_last: Math.min(
+          500,
+          Math.max(0, parseInt(String(document.getElementById('continue-episodic-keep')?.value || '48'), 10) || 0)
+        )
       };
       const MAX_CONTINUE_CHAPTERS = 500;
       const cc = parseInt(String(document.getElementById('continue-chapter-count')?.value || '1'), 10);
@@ -1304,11 +1636,34 @@ document.addEventListener('DOMContentLoaded', async () => {
         body: JSON.stringify(payload)
       });
       if (logEl) {
+        let text = '';
         if (data.chapters && Array.isArray(data.chapters)) {
-          logEl.textContent = `—— 续写完成 ${data.chapters_written || data.chapters.length} 章 ——\n${data.chapters.map((c) => `第 ${c.chapter_index} 章 ${c.chapter_title || ''} → ${c.saved_file}`).join('\n')}\n书名：${data.book_title || ''}`;
+          text = `—— 续写完成 ${data.chapters_written || data.chapters.length} 章 ——\n${data.chapters.map((c) => `第 ${c.chapter_index} 章 ${c.chapter_title || ''} → ${c.saved_file}`).join('\n')}\n书名：${data.book_title || ''}`;
         } else {
-          logEl.textContent = `—— 续写完成 ——\n${data.saved_file}\n第 ${data.chapter_index} 章 ${data.chapter_title || ''}\n书名：${data.book_title}${data.book_id ? `\n书本 ID：${data.book_id}` : ''}`;
+          text = `—— 续写完成 ——\n${data.saved_file}\n第 ${data.chapter_index} 章 ${data.chapter_title || ''}\n书名：${data.book_title}${data.book_id ? `\n书本 ID：${data.book_id}` : ''}`;
         }
+        const ls = data.live_supervisor;
+        if (Array.isArray(ls)) {
+          for (const row of ls) {
+            const sum = row.review?.summary || row.error || '';
+            text += `\n[监督·第${row.chapter}章] ${sum}`;
+          }
+        }
+        const sf = data.supervisor_final;
+        if (sf && !sf.error && sf.meta_review) {
+          const mr = sf.meta_review;
+          text += `\n\n—— 总监督 ——\n健康分：${mr.health_score ?? '—'}\n${mr.summary || ''}`;
+        } else if (sf && sf.error) {
+          text += `\n\n总监督未完成：${sf.error}`;
+        }
+        const arc = data.continuation_arc;
+        if (arc && (arc.arc_notes || (arc.updated_indices && arc.updated_indices.length))) {
+          text += `\n\n[中观续写规划] ${arc.arc_notes || ''}`;
+          if (Array.isArray(arc.updated_indices) && arc.updated_indices.length) {
+            text += `\n已写回 plan 的章序：${arc.updated_indices.join('、')}`;
+          }
+        }
+        logEl.textContent = text;
       }
       if (gs) gs.textContent = '续写已保存，可在书库中阅读。';
       await refreshSeriesList();
@@ -1331,18 +1686,88 @@ document.addEventListener('DOMContentLoaded', async () => {
     const btn = document.getElementById('btn-save-settings');
     btn.disabled = true;
     try {
+      let metricsDomSelectors = [];
+      const rawSel = document.getElementById('metrics-dom-selectors')?.value?.trim() || '';
+      if (rawSel) {
+        let parsed;
+        try {
+          parsed = JSON.parse(rawSel);
+        } catch {
+          void showAppAlert('「自定义 CSS 选择器」须为合法 JSON 数组。', 'JSON 无效');
+          return;
+        }
+        if (!Array.isArray(parsed)) {
+          void showAppAlert('「自定义 CSS 选择器」须为 JSON 数组，例如 [{ "key": "x", "selector": ".y" }]。', '格式错误');
+          return;
+        }
+        metricsDomSelectors = parsed.filter(
+          (x) => x && typeof x.key === 'string' && typeof x.selector === 'string'
+        );
+      }
       await window.aiWriter.saveSettings({
         deepseekApiKey: document.getElementById('api-key').value.trim(),
         deepseekModel: document.getElementById('model-id').value.trim() || 'deepseek-chat',
-        booksRoot: document.getElementById('books-root-path')?.value?.trim() || ''
+        booksRoot: document.getElementById('books-root-path')?.value?.trim() || '',
+        snapshotAgentEnabled: document.getElementById('cb-snapshot-agent')?.checked ?? false,
+        snapshotPageUrl: document.getElementById('snapshot-page-url')?.value?.trim() || '',
+        metricsDomSelectors
       });
       await refreshHealth();
       await refreshThemes();
       await refreshReaderShell();
+      await refreshSnapshotRailHint();
+      if (pathsEl && window.aiWriter?.getPaths) {
+        try {
+          const p = await window.aiWriter.getPaths();
+          pathsEl.textContent = `UserData:\n${p.userData}\n下载:\n${p.downloads}${
+            p.snapshotRoot ? `\n快照目录:\n${p.snapshotRoot}` : ''
+          }${p.analyticsRoot ? `\n分析目录:\n${p.analyticsRoot}` : ''}`;
+        } catch {
+          /* noop */
+        }
+      }
     } catch (e) {
       void showAppAlert(e.message || String(e), '保存设置失败');
     } finally {
       btn.disabled = false;
+    }
+  });
+
+  document.getElementById('btn-snapshot-login')?.addEventListener('click', async () => {
+    if (!window.aiWriter?.openSnapshotLogin) {
+      void showAppAlert('请使用桌面版启动。', 'DOM 抓取');
+      return;
+    }
+    try {
+      await window.aiWriter.openSnapshotLogin();
+    } catch (e) {
+      void showAppAlert(e?.message || String(e), '打开登录页失败');
+    }
+  });
+
+  document.getElementById('btn-snapshot-test-am')?.addEventListener('click', async () => {
+    if (!window.aiWriter?.testSnapshotNow) return;
+    try {
+      const r = await window.aiWriter.testSnapshotNow('morning');
+      if (r?.skipped) void showAppAlert(String(r.reason || '已跳过'), '试抓·早');
+      else if (r?.ok) void showAppAlert(`已追加 JSONL：${r.path || ''}`, '试抓·早');
+      else void showAppAlert(r?.error || JSON.stringify(r), '试抓·早');
+      await refreshSnapshotRailHint();
+    } catch (e) {
+      void showAppAlert(e?.message || String(e), '试抓失败');
+    }
+  });
+
+  document.getElementById('btn-snapshot-test-pm')?.addEventListener('click', async () => {
+    if (!window.aiWriter?.testSnapshotNow) return;
+    try {
+      const r = await window.aiWriter.testSnapshotNow('evening');
+      if (r?.skipped) void showAppAlert(String(r.reason || '已跳过'), '试抓·晚');
+      else if (r?.ok) void showAppAlert(`已追加 JSONL：${r.path || ''}`, '试抓·晚');
+      else void showAppAlert(r?.error || JSON.stringify(r), '试抓·晚');
+      await refreshSnapshotRailHint();
+    } catch (e) {
+      void showAppAlert(e?.message || String(e), '试抓失败');
     }
   });
 

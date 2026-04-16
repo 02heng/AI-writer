@@ -1,6 +1,6 @@
 {
   "name": "ai-writer",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "AI novel writer — Electron shell, data on D:/E: drive",
   "author": "02heng",
   "main": "electron/main.cjs",

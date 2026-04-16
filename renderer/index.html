@@ -171,6 +171,22 @@
                 </div>
                 <div class="form-col-span2">
                   <label class="chk-row chk-row--tight">
+                    <input type="checkbox" id="pipeline-live-supervisor" checked />
+                    <span>逐章监督审查（每章写完后调用监督智能体；流式进度会推送摘要，额外 API）</span>
+                  </label>
+                  <label class="chk-row chk-row--tight" style="margin-top: 0.35rem">
+                    <input type="checkbox" id="pipeline-final-supervisor" checked />
+                    <span>全书完成后总监督（元审查：对 Writer/编排/plan 的迭代建议，写入 <span class="inline-code">orchestration/state.json</span> 的 open_issues，额外 API）</span>
+                  </label>
+                  <label class="chk-row chk-row--tight" style="margin-top: 0.35rem">
+                    <input type="checkbox" id="pipeline-foreshadow-sync" />
+                    <span>每章后同步结构化伏笔表（memory/foreshadowing.json，额外 API）</span>
+                  </label>
+                  <label class="lbl" for="pipeline-episodic-keep" style="margin-top: 0.5rem">情节萃取保留条数（0=不淘汰旧萃取）</label>
+                  <input type="number" id="pipeline-episodic-keep" class="inp" min="0" max="500" value="0" />
+                </div>
+                <div class="form-col-span2">
+                  <label class="chk-row chk-row--tight">
                     <input type="checkbox" id="cb-pipeline-memory" checked />
                     <span>生成时注入长期记忆（本书宫殿 + 可选全局宫殿）</span>
                   </label>
@@ -224,6 +240,28 @@
                     <input type="checkbox" id="continue-reader-test" />
                     <span>每章追加盲测读者（仅 full，额外 API）</span>
                   </label>
+                </div>
+                <div class="form-col-span2">
+                  <label class="chk-row chk-row--tight">
+                    <input type="checkbox" id="continue-live-supervisor" checked />
+                    <span>逐章监督审查（每章续写完成后；额外 API）</span>
+                  </label>
+                  <label class="chk-row chk-row--tight" style="margin-top: 0.35rem">
+                    <input type="checkbox" id="continue-final-supervisor" checked />
+                    <span>本批结束后总监督（写入 orchestration/state.json，额外 API）</span>
+                  </label>
+                </div>
+                <div class="form-col-span2">
+                  <label class="chk-row chk-row--tight">
+                    <input type="checkbox" id="continue-arc-plan" checked />
+                    <span>多章续写前先规划中观弧（写回 plan：各章 beat、为后文留白、章末钩；仅当章数大于 1）</span>
+                  </label>
+                  <label class="chk-row chk-row--tight" style="margin-top: 0.35rem">
+                    <input type="checkbox" id="continue-foreshadow-sync" checked />
+                    <span>每章后同步结构化伏笔表（memory/foreshadowing.json，额外 API）</span>
+                  </label>
+                  <label class="lbl" for="continue-episodic-keep" style="margin-top: 0.5rem">情节萃取保留条数（0=不淘汰）</label>
+                  <input type="number" id="continue-episodic-keep" class="inp" min="0" max="500" value="48" />
                 </div>
                 <div class="form-actions">
                   <button type="button" class="btn btn-secondary" id="btn-refresh-series">刷新列表</button>

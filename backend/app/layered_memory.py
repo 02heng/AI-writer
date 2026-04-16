@@ -25,6 +25,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
+from .character_profiles import character_profile_path
 from .core.logging import get_logger, LogContext
 from .memory_store import (
     add_entry as add_memory_entry,
@@ -101,8 +102,8 @@ def load_character_profiles_summary(book_root: Path) -> str:
         name = char.get("name", "")
         if not name:
             continue
-        
-        profile_path = chars_dir / f"{name}.json"
+
+        profile_path = character_profile_path(book_root, str(name))
         if profile_path.is_file():
             try:
                 profile = json.loads(profile_path.read_text(encoding="utf-8"))

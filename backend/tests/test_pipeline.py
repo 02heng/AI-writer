@@ -54,6 +54,8 @@ class TestPipelineHelpers:
         
         result = _scale_instruction("short")
         assert "短篇" in result
+        assert "短篇读者节奏" in result
+        assert "三百至八百" in result
         assert "紧凑" in result
 
     def test_scale_instruction_medium(self) -> None:
@@ -90,6 +92,46 @@ class TestPipelineHelpers:
         
         result = _protagonist_instruction("any")
         assert "自然呈现" in result
+
+    def test_sanitize_chapter_body_strips_double_asterisk_bold(self) -> None:
+        from app.pipeline import sanitize_chapter_body
+
+        assert sanitize_chapter_body("她说**不行**。") == "她说不行。"
+        assert sanitize_chapter_body("**起**与**止**") == "起与止"
+
+    def test_sanitize_chapter_body_strips_markdown_line_noise(self) -> None:
+        from app.pipeline import sanitize_chapter_body
+
+        raw = "> 他点头。\n>> 又道：好。\n- 走吧。\n* 也行。\n1. 开场白\n正文一段"
+        out = sanitize_chapter_body(raw)
+        assert ">" not in out
+        assert not out.startswith("-")
+        assert "他点头。" in out
+        assert "正文一段" in out
+
+    def test_sanitize_chapter_body_strips_comma_hyphen_glitch(self) -> None:
+        from app.pipeline import sanitize_chapter_body
+
+        assert "，" in sanitize_chapter_body("沉默,-良久")
+        assert ",-" not in sanitize_chapter_body("沉默,-良久")
+
+    def test_strip_common_prefix_with_previous_opening(self) -> None:
+        from app.text_sanitize import strip_common_prefix_with_previous_opening
+
+        prev = "OPEN_A\n" + "PARA_REPEAT\n" * 30
+        tail = "X" * 120
+        new = prev + tail
+        out = strip_common_prefix_with_previous_opening(
+            prev, new, min_chars=50, min_kept_after_strip=40
+        )
+        assert out == tail
+
+    def test_clean_stored_chapter_text_strips_bold(self) -> None:
+        from app.book_storage import clean_stored_chapter_text
+
+        raw = "<!--meta-->\n\n**他们**走了。"
+        assert "**" not in clean_stored_chapter_text(raw)
+        assert clean_stored_chapter_text(raw).endswith("走了。")
 
 
 class TestChapterContract:
@@ -148,6 +190,29 @@ class TestChapterContract:
         
         assert "续写" in result
 
+    def test_format_chapter_contract_space_for_later(self) -> None:
+        from app.pipeline import _format_chapter_contract
+
+        chapter = {"idx": 4, "beat": "推进主线", "space_for_later": "为终盘留反转余地"}
+        result = _format_chapter_contract(4, chapter)
+        assert "为后文留白" in result
+        assert "终盘" in result
+
+    def test_format_chapter_contract_short_length_uses_short_structure(self) -> None:
+        from app.pipeline import _format_chapter_contract
+
+        chapter = {"idx": 1, "beat": "开局冲突"}
+        result = _format_chapter_contract(1, chapter, length_scale="short")
+        assert "结构提示·短篇" in result
+
+    def test_format_chapter_contract_default_structure_not_short_label(self) -> None:
+        from app.pipeline import _format_chapter_contract
+
+        chapter = {"idx": 1, "beat": "开局冲突"}
+        result = _format_chapter_contract(1, chapter)
+        assert "【结构提示】" in result
+        assert "结构提示·短篇" not in result
+
 
 class TestNormalizeChapterEntry:
     """Tests for chapter entry normalization."""
@@ -178,6 +243,14 @@ class TestNormalizeChapterEntry:
         result = _normalize_chapter_entry(raw, 1)
         
         assert result is None
+
+    def test_normalize_chapter_entry_space_for_later(self) -> None:
+        from app.pipeline import _normalize_chapter_entry
+
+        raw = {"idx": 5, "beat": "x", "space_for_later": "留白一句"}
+        r = _normalize_chapter_entry(raw, 5)
+        assert r is not None
+        assert r.get("space_for_later") == "留白一句"
 
     def test_normalize_chapter_entry_with_scenes(self) -> None:
         """Test normalizing entry with scenes."""

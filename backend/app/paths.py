@@ -50,6 +50,32 @@ def user_data_root() -> Path:
     return Path.cwd()
 
 
+def analytics_root() -> Path:
+    """分析/审核/指标等记录根目录，默认与 UserData 同级：D:/AI-writer-data/Analytics。"""
+    raw = os.environ.get("AIWRITER_ANALYTICS_ROOT", "").strip()
+    if raw:
+        p = Path(raw).expanduser().resolve()
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    ud = user_data_root().resolve()
+    if ud.name.lower() == "userdata":
+        p = (ud.parent / "Analytics").resolve()
+    else:
+        p = (ud / "Analytics").resolve()
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def snapshots_library_dir() -> Path:
+    """与 Analytics 同级的 Snapshots（Electron 页面截图库）。"""
+    a = analytics_root().resolve()
+    if a.name == "Analytics":
+        snap = (a.parent / "Snapshots").resolve()
+    else:
+        snap = (a / "Snapshots").resolve()
+    return snap
+
+
 def ensure_layout(root: Path) -> None:
     (root / "kb").mkdir(parents=True, exist_ok=True)
     (root / "prompts").mkdir(parents=True, exist_ok=True)

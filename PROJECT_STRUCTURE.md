@@ -17,7 +17,8 @@
 - `main.cjs`：创建窗口、加载 `renderer/index.html`
 - `preload.cjs`：暴露 `getBackendUrl`、`getPaths`、`loadSettings`、`saveSettings` 等给渲染进程
 - `backend.cjs`：在子进程启动 Python API（默认端口 `18765`）；为子进程设置 `TEMP`/`TMP` 到 `UserData/.runtime-temp`，减少临时文件写系统盘
-- `paths.cjs`：解析 UserData 根目录；在数据根下创建 `UserData`、`Cache`、`Downloads`、`Logs`、`Temp`；早期调试日志写入 `Logs/`
+- `paths.cjs`：解析 UserData 根目录；在数据根下创建 `UserData`、`Cache`、`Downloads`、`Logs`、`Temp`；早期调试日志写入 `Logs/`；`resolveSnapshotRoot` 将作家后台每日截图存到数据盘 `Snapshots/`
+- `snapshot-scheduler.cjs`：定时 8:00 / 20:00 各一张 PNG（持久 session 登录）；启动补拍；次日删昨日日期目录
 
 ## 前端（`renderer/`）
 

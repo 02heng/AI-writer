@@ -151,3 +151,16 @@ class TestMemoryEndpoints:
             entries = list_response.json()["entries"]
             assert len(entries) == 1
             assert entries[0]["title"] == "Test Entry"
+
+
+class TestExportPlainTextDedupesChapterTitle:
+    def test_strip_redundant_chapter_title_line(self) -> None:
+        from app.book_storage import _strip_redundant_chapter_title_line
+
+        body = "开场标题\n\n正文第一段。"
+        out = _strip_redundant_chapter_title_line(body, 1, "开场标题")
+        assert "开场标题" not in out.split("\n")[0]
+        assert out.startswith("正文第一段")
+
+        keep = _strip_redundant_chapter_title_line("别的起句\n\n后文", 1, "开场标题")
+        assert keep.startswith("别的起句")

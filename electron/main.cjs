@@ -4,8 +4,21 @@ const { app, BrowserWindow, session, shell, ipcMain, dialog } = require('electro
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { applyNonSystemDrivePaths, resolveEarlyLogFile } = require('./paths.cjs');
+const {
+  applyNonSystemDrivePaths,
+  resolveAnalyticsRoot,
+  resolveEarlyLogFile,
+  resolveSnapshotRoot
+} = require('./paths.cjs');
 const { startBackend, stopBackend, getBackendBaseUrl } = require('./backend.cjs');
+const {
+  initSnapshotScheduler,
+  disposeSnapshotScheduler,
+  openLoginWindow,
+  captureSnapshot,
+  getSnapshotInfo,
+  notifySettingsMayHaveEnabledSnap
+} = require('./snapshot-scheduler.cjs');
 
 // #region agent log
 function agentLog(location, message, data, hypothesisId) {
@@ -136,12 +149,28 @@ function registerAllIpcHandlers() {
     }
   }
 
-  ipcMain.handle('aiwriter:get-paths', () => ({
-    userData: app.getPath('userData'),
-    downloads: app.getPath('downloads'),
-    cache: app.getPath('cache'),
-    logs: app.getPath('logs')
-  }));
+  ipcMain.handle('aiwriter:get-paths', () => {
+    let snapshotRoot = '';
+    let analyticsRoot = '';
+    try {
+      snapshotRoot = resolveSnapshotRoot(app) || '';
+    } catch {
+      snapshotRoot = '';
+    }
+    try {
+      analyticsRoot = resolveAnalyticsRoot(app) || '';
+    } catch {
+      analyticsRoot = '';
+    }
+    return {
+      userData: app.getPath('userData'),
+      downloads: app.getPath('downloads'),
+      cache: app.getPath('cache'),
+      logs: app.getPath('logs'),
+      snapshotRoot,
+      analyticsRoot
+    };
+  });
 
   ipcMain.handle('aiwriter:get-backend-url', () => getBackendBaseUrl());
 
@@ -152,10 +181,22 @@ function registerAllIpcHandlers() {
       return {
         deepseekApiKey: s.deepseekApiKey || '',
         deepseekModel: s.deepseekModel || 'deepseek-chat',
-        booksRoot: s.booksRoot || ''
+        booksRoot: s.booksRoot || '',
+        snapshotAgentEnabled: Boolean(s.snapshotAgentEnabled),
+        snapshotPageUrl:
+          (s.snapshotPageUrl && String(s.snapshotPageUrl).trim()) ||
+          'https://fanqienovel.com/main/writer/data?bookId=7628439872088329241',
+        metricsDomSelectors: Array.isArray(s.metricsDomSelectors) ? s.metricsDomSelectors : []
       };
     } catch {
-      return { deepseekApiKey: '', deepseekModel: 'deepseek-chat', booksRoot: '' };
+      return {
+        deepseekApiKey: '',
+        deepseekModel: 'deepseek-chat',
+        booksRoot: '',
+        snapshotAgentEnabled: false,
+        snapshotPageUrl: 'https://fanqienovel.com/main/writer/data?bookId=7628439872088329241',
+        metricsDomSelectors: []
+      };
     }
   });
 
@@ -168,12 +209,39 @@ function registerAllIpcHandlers() {
     } catch {
       // ignore
     }
+    let metricsDomSelectors = Array.isArray(prev.metricsDomSelectors)
+      ? prev.metricsDomSelectors
+      : [];
+    if (data.metricsDomSelectors !== undefined) {
+      if (Array.isArray(data.metricsDomSelectors)) {
+        metricsDomSelectors = data.metricsDomSelectors.filter(
+          (x) => x && typeof x.key === 'string' && typeof x.selector === 'string'
+        );
+      }
+    }
     const merged = {
       deepseekApiKey: data.deepseekApiKey ?? prev.deepseekApiKey ?? '',
       deepseekModel: data.deepseekModel ?? prev.deepseekModel ?? 'deepseek-chat',
-      booksRoot: data.booksRoot !== undefined ? data.booksRoot : prev.booksRoot || ''
+      booksRoot: data.booksRoot !== undefined ? data.booksRoot : prev.booksRoot || '',
+      snapshotAgentEnabled:
+        data.snapshotAgentEnabled !== undefined
+          ? Boolean(data.snapshotAgentEnabled)
+          : Boolean(prev.snapshotAgentEnabled),
+      snapshotPageUrl:
+        data.snapshotPageUrl !== undefined
+          ? String(data.snapshotPageUrl || '').trim()
+          : prev.snapshotPageUrl ||
+            'https://fanqienovel.com/main/writer/data?bookId=7628439872088329241',
+      metricsDomSelectors
     };
     fs.writeFileSync(settingsPath(), JSON.stringify(merged, null, 2), 'utf8');
+    if (merged.snapshotAgentEnabled) {
+      try {
+        notifySettingsMayHaveEnabledSnap();
+      } catch {
+        /* noop */
+      }
+    }
     stopBackend();
     await startBackend({ userDataPath: app.getPath('userData'), projectRoot });
     return { ok: true };
@@ -197,6 +265,18 @@ function registerAllIpcHandlers() {
     stopBackend();
     await startBackend({ userDataPath: app.getPath('userData'), projectRoot });
     return { ok: true };
+  });
+
+  ipcMain.handle('aiwriter:open-snapshot-login', async () => {
+    openLoginWindow();
+    return { ok: true };
+  });
+
+  ipcMain.handle('aiwriter:get-snapshot-info', async () => getSnapshotInfo());
+
+  ipcMain.handle('aiwriter:test-snapshot-now', async (_e, payload) => {
+    const slot = payload && payload.slot === 'evening' ? 'evening' : 'morning';
+    return captureSnapshot(slot, { force: true });
   });
 
   agentLog('main.cjs:ipc', 'registerAllIpcHandlers done', { channels: IPC_CHANNELS }, 'H1');
@@ -236,6 +316,7 @@ app.whenReady().then(async () => {
   }
 
   createWindow();
+  initSnapshotScheduler({ app });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -245,6 +326,7 @@ app.whenReady().then(async () => {
 });
 
 app.on('before-quit', () => {
+  disposeSnapshotScheduler();
   stopBackend();
 });
 

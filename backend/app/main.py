@@ -8,13 +8,13 @@ import threading
 import time
 from pathlib import Path
 from queue import Queue
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import quote
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from .book_storage import (
@@ -35,6 +35,11 @@ from .book_storage import (
 )
 from .library_fs import list_out_markdown, list_series, safe_out_md_path, safe_series_prefix
 from .llm import chat_completion, stream_chat_completion
+from .orchestration.supervisor import (
+    agent_supervisor_meta_review,
+    load_context_for_supervisor_review,
+    supervisor_integrity_report,
+)
 from .pipeline import (
     MAX_CONTINUE_CHAPTERS,
     MAX_PIPELINE_CHAPTERS,
@@ -67,7 +72,16 @@ from .character_profiles import (
 )
 from .layered_memory import LayeredMemory
 from .llm.providers import list_available_providers
-from .paths import ensure_layout, user_data_root
+from .analytics_store import (
+    analytics_info,
+    analytics_raw_path,
+    append_metrics_jsonl,
+    ensure_analytics_layout,
+    list_analytics_items,
+    read_analytics_file,
+    save_supervisor_review_snapshot,
+)
+from .paths import analytics_root, ensure_layout, snapshots_library_dir, user_data_root
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 THEMES = load_themes(PACKAGE_DIR)
@@ -87,6 +101,7 @@ load_dotenv()
 
 ROOT = user_data_root()
 ensure_layout(ROOT)
+ensure_analytics_layout()
 init_db(ROOT)
 
 
@@ -230,6 +245,24 @@ class PipelineFromTitleBody(BaseModel):
         max_length=8000,
         description="可选：用户对整部书的看法、立意、气质或禁忌；写入 meta 与记忆宫殿并参与策划与写作",
     )
+    live_supervisor: bool = Field(
+        default=False,
+        description="为真时每章写入后调用监督智能体快审，并通过流式事件 supervisor_chapter 推送",
+    )
+    final_supervisor: bool = Field(
+        default=False,
+        description="为真时全书章完成后运行总监督元审查，写入 orchestration/state.json 的 open_issues，并返回 supervisor_final",
+    )
+    memory_episodic_keep_last: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=500,
+        description="一键全书：每章后淘汰旧的情节萃取条数上限；None=不淘汰，0 亦表示不淘汰",
+    )
+    foreshadowing_sync_after_chapter: bool = Field(
+        default=False,
+        description="一键全书：每章后更新结构化伏笔 JSON（额外 API）",
+    )
 
     @model_validator(mode="after")
     def planned_total_ge_round(self) -> PipelineFromTitleBody:
@@ -261,6 +294,28 @@ class PipelineContinueBody(BaseModel):
         le=1,
         description="覆盖脑洞程度；不传则沿用书本 plan.meta.ideation_level，缺省 0.5",
     )
+    live_supervisor: bool = Field(
+        default=False,
+        description="为真时每章续写完成后做监督快审（仅 book_id 模式）",
+    )
+    final_supervisor: bool = Field(
+        default=False,
+        description="为真时本批续写结束后运行总监督并写入 orchestration/state.json（仅 book_id）",
+    )
+    continuation_arc_plan: bool = Field(
+        default=True,
+        description="续写章数>1 时先调用中观规划写回 plan.json（beat/留白/章末钩）；仅 book_id",
+    )
+    memory_episodic_keep_last: int = Field(
+        default=48,
+        ge=0,
+        le=500,
+        description="情节房间自动萃取条目保留最近条数，0=不淘汰；仅 book_id",
+    )
+    foreshadowing_sync_after_chapter: bool = Field(
+        default=True,
+        description="每章后续写后同步 memory/foreshadowing.json（开放/已收）；仅 book_id",
+    )
 
 
 class TrashRestoreBody(BaseModel):
@@ -269,6 +324,13 @@ class TrashRestoreBody(BaseModel):
 
 class TrashPurgeBody(BaseModel):
     folder: str = Field(..., min_length=4, max_length=64)
+
+
+class SupervisorReviewBody(BaseModel):
+    max_run_lines: int = Field(default=40, ge=5, le=300, description="纳入元审查的 agent_runs.jsonl 最近行数")
+    save_to_analytics: bool = Field(
+        default=False, description="为真时将 integrity + meta_review 写入 Analytics/reviews/*.json"
+    )
 
 
 def _read_text(rel: Path) -> str:
@@ -311,12 +373,14 @@ def _compose_system(base_system: str, theme_id: Optional[str]) -> str:
 
 
 # 递增：Electron 启动时用于识别「本机 18765 上是否为当前应用的后端」，避免旧版/他进程占位导致 404。
-API_REVISION = 4
+API_REVISION = 7
 
 
 @app.get("/api/health")
 def health():
     has_key = bool(os.environ.get("DEEPSEEK_API_KEY", "").strip())
+    ar = analytics_root()
+    snap = snapshots_library_dir()
     return {
         "ok": True,
         "api_revision": API_REVISION,
@@ -328,7 +392,36 @@ def health():
         "books_root": str(books_root(ROOT)),
         "books_root_env": bool(os.environ.get("AIWRITER_BOOKS_ROOT", "").strip()),
         "deepseek_configured": has_key,
+        "analytics_root": str(ar),
+        "snapshots_dir": str(snap),
     }
+
+
+@app.get("/api/analytics/info")
+def api_analytics_info():
+    return analytics_info()
+
+
+@app.get("/api/analytics/list")
+def api_analytics_list():
+    return list_analytics_items()
+
+
+@app.get("/api/analytics/file")
+def api_analytics_file(rel: str):
+    return read_analytics_file(rel)
+
+
+@app.get("/api/analytics/raw")
+def api_analytics_raw(rel: str):
+    p, media = analytics_raw_path(rel)
+    return FileResponse(p, media_type=media, filename=p.name)
+
+
+@app.post("/api/analytics/metrics/append")
+def api_analytics_metrics_append(record: dict[str, Any] = Body(...)):
+    """供本地脚本/自动化追加一行指标 JSON（写入 Analytics/metrics/daily.jsonl）。"""
+    return append_metrics_jsonl(record)
 
 
 @app.get("/api/themes")
@@ -408,6 +501,29 @@ def api_book_detail(book_id: str):
 def api_book_chapter_ns(book_id: str):
     book_dir(ROOT, book_id)
     return {"ns": get_chapter_numbers(ROOT, book_id)}
+
+
+@app.get("/api/books/{book_id}/supervisor/report")
+def api_supervisor_report(book_id: str):
+    """监督层：章节与 plan 对齐、缺章、编排状态等（不调用 LLM）。"""
+    book_dir(ROOT, book_id)
+    return supervisor_integrity_report(ROOT, book_id)
+
+
+@app.post("/api/books/{book_id}/supervisor/review")
+def api_supervisor_review(book_id: str, body: SupervisorReviewBody = SupervisorReviewBody()):
+    """监督智能体：完整性报告 + 近期子智能体日志 → 元审查 JSON（需 DEEPSEEK_API_KEY）。"""
+    book_dir(ROOT, book_id)
+    if not os.environ.get("DEEPSEEK_API_KEY", "").strip():
+        raise HTTPException(status_code=400, detail="未配置 DEEPSEEK_API_KEY，无法运行监督审查")
+    integrity, recent = load_context_for_supervisor_review(
+        ROOT, book_id, max_run_lines=body.max_run_lines
+    )
+    meta_review = agent_supervisor_meta_review(integrity=integrity, recent_runs=recent)
+    saved: dict[str, Any] | None = None
+    if body.save_to_analytics:
+        saved = save_supervisor_review_snapshot(book_id, integrity, meta_review)
+    return {"integrity": integrity, "meta_review": meta_review, "saved": saved}
 
 
 @app.get("/api/books/{book_id}/toc")
@@ -589,6 +705,14 @@ def pipeline_from_title(body: PipelineFromTitleBody):
             planned_total_chapters=body.planned_total_chapters,
             ideation_level=body.ideation_level,
             user_book_note=body.user_book_note,
+            live_supervisor=bool(body.live_supervisor),
+            final_supervisor=bool(body.final_supervisor),
+            memory_episodic_keep_last=(
+                int(body.memory_episodic_keep_last)
+                if body.memory_episodic_keep_last is not None and int(body.memory_episodic_keep_last) > 0
+                else None
+            ),
+            foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
         )
     except HTTPException:
         raise
@@ -646,6 +770,15 @@ async def pipeline_from_title_stream(body: PipelineFromTitleBody):
                     planned_total_chapters=body.planned_total_chapters,
                     ideation_level=body.ideation_level,
                     user_book_note=body.user_book_note,
+                    live_supervisor=bool(body.live_supervisor),
+                    final_supervisor=bool(body.final_supervisor),
+                    memory_episodic_keep_last=(
+                        int(body.memory_episodic_keep_last)
+                        if body.memory_episodic_keep_last is not None
+                        and int(body.memory_episodic_keep_last) > 0
+                        else None
+                    ),
+                    foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
                 )
                 q.put(("done", r))
             except HTTPException as he:
@@ -701,6 +834,8 @@ def pipeline_continue(body: PipelineContinueBody):
         ap = "fast"
     bid = (body.book_id or "").strip()
     sp = (body.series_prefix or "").strip()
+    mek = int(body.memory_episodic_keep_last)
+    episodic_keep = mek if mek > 0 else None
     try:
         if bid:
             cnt = max(1, min(int(body.chapter_count or 1), MAX_CONTINUE_CHAPTERS))
@@ -718,6 +853,11 @@ def pipeline_continue(body: PipelineContinueBody):
                     agent_profile=ap,
                     run_reader_test=bool(body.run_reader_test),
                     ideation_level=body.ideation_level,
+                    live_supervisor=bool(body.live_supervisor),
+                    final_supervisor=bool(body.final_supervisor),
+                    continuation_arc_plan=bool(body.continuation_arc_plan),
+                    memory_episodic_keep_last=episodic_keep,
+                    foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
                 )
             else:
                 result = run_continue_next_chapter(
@@ -732,6 +872,10 @@ def pipeline_continue(body: PipelineContinueBody):
                     agent_profile=ap,
                     run_reader_test=bool(body.run_reader_test),
                     ideation_level=body.ideation_level,
+                    live_supervisor=bool(body.live_supervisor),
+                    final_supervisor=bool(body.final_supervisor),
+                    memory_episodic_keep_last=episodic_keep,
+                    foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
                 )
         elif sp:
             prefix = safe_series_prefix(sp)

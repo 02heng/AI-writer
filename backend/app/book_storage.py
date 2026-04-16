@@ -12,6 +12,7 @@ from typing import Any, Optional
 from fastapi import HTTPException
 
 from .memory_store import init_db as init_memory_db
+from .text_sanitize import strip_aiwriter_prose_noise, strip_markdown_double_asterisk_bold
 
 
 def books_root(data_root: Path) -> Path:
@@ -208,13 +209,14 @@ def get_plan(data_root: Path, book_id: str) -> dict[str, Any]:
 
 
 def clean_stored_chapter_text(text: str) -> str:
-    """Remove legacy HTML comment headers and trim."""
+    """Remove HTML comment headers, Markdown **bold**, line-leading > / lists, `,-` glitches, and trim."""
     t = text
     if t.strip().startswith("<!--"):
         close = t.find("-->")
         if close != -1:
             t = t[close + 3 :].lstrip()
-    return t.strip()
+    out = strip_markdown_double_asterisk_bold(t.strip())
+    return strip_aiwriter_prose_noise(out)
 
 
 def _title_from_chapter_file(chapter_path: Path) -> str:
@@ -351,6 +353,15 @@ def write_orchestration_state(data_root: Path, book_id: str, state: dict[str, An
     )
 
 
+def append_agent_orchestration_log(data_root: Path, book_id: str, record: dict[str, Any]) -> None:
+    """追加一行章节编排日志，供监督智能体（元审查）做历史与失败率分析。"""
+    orch = book_dir(data_root, book_id) / "orchestration"
+    orch.mkdir(parents=True, exist_ok=True)
+    p = orch / "agent_runs.jsonl"
+    with p.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def read_memory_summary(data_root: Path, book_id: str) -> str:
     p = book_dir(data_root, book_id) / "memory" / "palace_summary.md"
     if not p.is_file():
@@ -465,6 +476,35 @@ def _md_to_plainish(md: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _strip_redundant_chapter_title_line(
+    plain_body: str,
+    chapter_n: int,
+    chapter_title: str,
+) -> str:
+    """If the first non-empty line repeats the chapter title already printed in the export header, drop it."""
+    t = plain_body.strip()
+    if not t:
+        return plain_body
+    lines = t.split("\n")
+    first = lines[0].strip()
+    ct = chapter_title.strip()
+    if not first:
+        return plain_body
+    drop = False
+    if ct and first == ct:
+        drop = True
+    elif first == f"第 {chapter_n} 章":
+        drop = True
+    elif ct and first == f"第 {chapter_n} 章 {ct}":
+        drop = True
+    if not drop:
+        return plain_body
+    rest = lines[1:]
+    while rest and not rest[0].strip():
+        rest = rest[1:]
+    return "\n".join(rest) if rest else ""
+
+
 def export_book_plain_text(data_root: Path, book_id: str) -> str:
     meta = get_meta(data_root, book_id)
     title = str(meta.get("title") or book_id)
@@ -480,6 +520,8 @@ def export_book_plain_text(data_root: Path, book_id: str) -> str:
         _fn, content, _t = read_chapter(data_root, book_id, n)
         parts.append(f"第 {n} 章 {ch_title}")
         parts.append("")
-        parts.append(_md_to_plainish(content))
+        body_plain = _md_to_plainish(content)
+        body_plain = _strip_redundant_chapter_title_line(body_plain, n, ch_title)
+        parts.append(body_plain)
         parts.extend(["", ""])
     return "\n".join(parts).strip() + "\n"

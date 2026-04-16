@@ -12,6 +12,7 @@ from app.memory_store import (
     delete_entry,
     init_db,
     list_entries,
+    list_entries_for_chapter_range,
     read_rollup,
     write_rollup,
 )
@@ -133,3 +134,33 @@ class TestMemoryStore:
         context = build_memory_context(temp_data_dir, max_chars=500)
         
         assert len(context) <= 520  # Allow small buffer for truncation message
+
+    def test_list_entries_for_chapter_range(self, temp_data_dir: Path) -> None:
+        init_db(temp_data_dir)
+        add_entry(
+            temp_data_dir,
+            room="情节",
+            title="第1章 · 萃取",
+            body="a",
+            chapter_label="1",
+        )
+        add_entry(
+            temp_data_dir,
+            room="情节",
+            title="第5章 · 萃取",
+            body="b",
+            chapter_label="5",
+        )
+        add_entry(
+            temp_data_dir,
+            room="情节",
+            title="非数字章标签",
+            body="c",
+            chapter_label="序",
+        )
+        r = list_entries_for_chapter_range(temp_data_dir, 2, 10, limit=50)
+        assert len(r) == 1
+        assert r[0]["chapter_label"] == "5"
+        r2 = list_entries_for_chapter_range(temp_data_dir, 1, 1, limit=50)
+        assert len(r2) == 1
+        assert r2[0]["chapter_label"] == "1"

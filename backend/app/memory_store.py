@@ -6,6 +6,9 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from .memory_hooks import foreshadowing_open_hooks_block
+from .memory_relevance import rank_memory_entries, semantic_memory_enabled
+
 DB_NAME = "palace.sqlite3"
 ROLLUP_NAME = "palace_summary.md"
 
@@ -90,6 +93,35 @@ def list_entries(root: Path, *, limit: int = 80) -> list[dict[str, Any]]:
         conn.close()
 
 
+def list_entries_for_chapter_range(
+    root: Path, chapter_lo: int, chapter_hi: int, *, limit: int = 500
+) -> list[dict[str, Any]]:
+    """列出 chapter_label 为数字且在 [chapter_lo, chapter_hi] 内的条目（按章序、id）。"""
+    init_db(root)
+    lo = int(chapter_lo)
+    hi = int(chapter_hi)
+    if hi < lo or lo < 1:
+        return []
+    conn = sqlite3.connect(db_path(root))
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.execute(
+            """
+            SELECT id, created_at, room, title, body, chapter_label
+            FROM memory_entries
+            WHERE chapter_label GLOB '[0-9]*'
+              AND CAST(chapter_label AS INTEGER) >= ?
+              AND CAST(chapter_label AS INTEGER) <= ?
+            ORDER BY CAST(chapter_label AS INTEGER) ASC, id ASC
+            LIMIT ?
+            """,
+            (lo, hi, int(limit)),
+        )
+        return [_row_to_dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 def add_entry(
     root: Path,
     *,
@@ -113,6 +145,33 @@ def add_entry(
         )
         row = cur.fetchone()
         return _row_to_dict(row) if row else {}
+    finally:
+        conn.close()
+
+
+def prune_episodic_extraction_entries(root: Path, *, keep_last: int) -> dict[str, Any]:
+    """
+    淘汰「情节」房间中由流水线自动写入的萃取条目（标题含「· 萃取」或「生成同步萃取」），
+    按时间新→旧保留 keep_last 条，删除更旧的记录以控制 token。
+    """
+    if keep_last < 1:
+        return {"deleted": 0, "reason": "keep_last<1"}
+    init_db(root)
+    conn = sqlite3.connect(db_path(root))
+    try:
+        cur = conn.execute(
+            "SELECT id FROM memory_entries WHERE room = ? AND "
+            "(title LIKE '%· 萃取%' OR title LIKE '%生成同步萃取%') "
+            "ORDER BY created_at DESC, id DESC",
+            ("情节",),
+        )
+        ids = [int(r[0]) for r in cur.fetchall()]
+        if len(ids) <= keep_last:
+            return {"deleted": 0, "matched": len(ids)}
+        drop_ids = ids[keep_last:]
+        conn.executemany("DELETE FROM memory_entries WHERE id = ?", [(i,) for i in drop_ids])
+        conn.commit()
+        return {"deleted": len(drop_ids), "matched": len(ids)}
     finally:
         conn.close()
 
@@ -144,17 +203,40 @@ def write_rollup(root: Path, text: str) -> None:
     rollup_path(root).write_text(text, encoding="utf-8")
 
 
-def build_memory_context(root: Path, *, max_chars: int = 4500) -> str:
-    """拼接总摘要 + 近期条目，供注入 user 侧上下文。"""
+def build_memory_context(
+    root: Path,
+    *,
+    max_chars: int = 4500,
+    semantic_query: Optional[str] = None,
+    fetch_pool: int = 360,
+    inject_foreshadowing: bool = True,
+) -> str:
+    """拼接总摘要 + 近期条目，供注入 user 侧上下文。
+
+    当设置环境变量 AIWRITER_MEMORY_SEMANTIC=1（默认开启）且传入 semantic_query 时，
+    从较多条目中按与 query 的字符重叠得分排序后取预算内条目，减轻「上千条只取时间最近」的噪声。
+    """
     init_db(root)
     parts: list[str] = []
     rollup = read_rollup(root).strip()
     if rollup:
         parts.append("【记忆宫殿 · 总摘要】\n" + rollup)
 
-    entries = list_entries(root, limit=40)
+    if inject_foreshadowing:
+        hook_blk = foreshadowing_open_hooks_block(root)
+        if hook_blk.strip():
+            parts.append(hook_blk)
+
+    use_sem = bool(semantic_query and semantic_query.strip() and semantic_memory_enabled())
+    entry_limit = fetch_pool if use_sem else 40
+    entries = list_entries(root, limit=entry_limit)
+    if use_sem:
+        entries = rank_memory_entries(entries, semantic_query.strip())
+        section_title = "【记忆宫殿 · 与当前任务相关条目（语义粗排）】"
+    else:
+        section_title = "【记忆宫殿 · 近期条目（抽屉层，新→旧）】"
     if entries:
-        lines: list[str] = ["【记忆宫殿 · 近期条目（抽屉层，新→旧）】"]
+        lines: list[str] = [section_title]
         budget = max_chars - sum(len(p) + 2 for p in parts)
         used = 0
         for e in entries:

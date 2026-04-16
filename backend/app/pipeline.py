@@ -10,8 +10,11 @@ from fastapi import HTTPException
 
 from .author_persona import build_voice_prompt_blocks, format_voice_from_book_meta, roll_virtual_author
 from .book_storage import (
+    append_agent_orchestration_log,
     book_dir,
+    clean_stored_chapter_text,
     create_book,
+    get_chapter_numbers,
     get_meta,
     get_plan,
     read_orchestration_state,
@@ -21,15 +24,140 @@ from .book_storage import (
 )
 from .core.logging import get_logger, LogContext
 from .jsonutil import extract_json_object
+from .text_sanitize import (
+    strip_aiwriter_prose_noise,
+    strip_common_prefix_with_previous_opening,
+    strip_markdown_double_asterisk_bold,
+)
 from .llm import LLMTransportError, chat_completion
-from .memory_store import add_entry, build_memory_context, init_db, read_rollup, write_rollup
+from .long_context_tail import append_chapter_tail_snippet, load_chapter_tail_for_prompt, maybe_compress_chapter_tail
+from .memory_hooks import foreshadowing_open_hooks_block, sync_foreshadowing_after_chapter
+from .memory_wiki import (
+    long_novel_wiki_memory_instruction,
+    maybe_append_changelog_after_supervisor,
+    maybe_wiki_compile_episodic_batch,
+    read_changelog_tail,
+)
+from .memory_store import (
+    add_entry,
+    build_memory_context,
+    init_db,
+    prune_episodic_extraction_entries,
+    read_rollup,
+    write_rollup,
+)
 from .orchestration.runner import orchestrator_bump_state, run_chapter_with_agents
+from .character_auto_seed import auto_seed_characters_after_chapter
+from .character_profiles import (
+    CHARACTER_REGISTRY_INSTRUCTION,
+    build_character_registry_block,
+    bump_character_mentions_from_plain,
+)
+from .orchestration.supervisor import (
+    agent_supervisor_live_chapter_review,
+    agent_supervisor_meta_review,
+    append_supervisor_final_to_orchestration_state,
+    compact_agent_log,
+    load_context_for_supervisor_review,
+)
 from .scene_writer import generate_chapter_with_scenes
 from .layered_memory import build_context_for_chapter
 
 logger = get_logger(__name__)
 
 ProgressCb = Optional[Callable[[dict[str, Any]], None]]
+
+
+def _live_supervisor_after_chapter(
+    *,
+    live_supervisor: bool,
+    book_title: str,
+    chapter_index: int,
+    chapter_title: str,
+    beat: str,
+    premise: str,
+    chapter_plain: str,
+    alog: dict[str, Any],
+    progress_cb: ProgressCb,
+) -> dict[str, Any] | None:
+    """逐章监督快审；返回可写入 live_supervisor 列表的一条记录。"""
+    if not live_supervisor:
+        return None
+    try:
+        live_rev = agent_supervisor_live_chapter_review(
+            book_title=book_title,
+            chapter_index=chapter_index,
+            chapter_title=chapter_title,
+            beat=(beat or "").strip(),
+            premise=premise,
+            chapter_plain=chapter_plain,
+            agent_chain_compact=compact_agent_log(alog),
+        )
+        entry: dict[str, Any] = {"chapter": chapter_index, "review": live_rev}
+        if progress_cb:
+            progress_cb(
+                {
+                    "event": "supervisor_chapter",
+                    "index": chapter_index,
+                    "title": chapter_title,
+                    "review": live_rev,
+                }
+            )
+        return entry
+    except Exception as e:
+        logger.warning("live supervisor chapter %s failed: %s", chapter_index, e)
+        err = str(e)[:500]
+        entry = {"chapter": chapter_index, "error": err}
+        if progress_cb:
+            progress_cb(
+                {
+                    "event": "supervisor_chapter",
+                    "index": chapter_index,
+                    "title": chapter_title,
+                    "error": err,
+                }
+            )
+        return entry
+
+
+def _final_supervisor_for_book(
+    *,
+    root: Path,
+    book_id: str,
+    progress_cb: ProgressCb = None,
+    max_run_lines: int = 80,
+) -> dict[str, Any]:
+    """全书/续写批次结束后的总监督：落盘 state.json，返回 API 用 payload。"""
+    try:
+        integrity, recent = load_context_for_supervisor_review(
+            root, book_id, max_run_lines=max_run_lines
+        )
+        meta_review = agent_supervisor_meta_review(integrity=integrity, recent_runs=recent)
+        orch = read_orchestration_state(root, book_id)
+        orch = append_supervisor_final_to_orchestration_state(
+            orch, integrity=integrity, meta_review=meta_review
+        )
+        write_orchestration_state(root, book_id, orch)
+        supervisor_final: dict[str, Any] = {
+            "integrity": {
+                "integrity_ok": integrity.get("integrity_ok"),
+                "needs_attention": integrity.get("needs_attention"),
+                "warnings": integrity.get("warnings"),
+                "written_count": integrity.get("written_count"),
+                "planned_count": integrity.get("planned_count"),
+            },
+            "meta_review": meta_review,
+        }
+        if progress_cb:
+            progress_cb({"event": "supervisor_final", **supervisor_final})
+        return supervisor_final
+    except Exception as e:
+        logger.warning("final supervisor failed: %s", e)
+        err = str(e)[:800]
+        if progress_cb:
+            progress_cb({"event": "supervisor_final", "error": err})
+        return {"error": err}
+
 
 # 本轮一键生成上限；超过 PLAN_SINGLE_SHOT_MAX 章时用分批策划，避免单次 JSON 过大导致模型截断或语法错误。
 MAX_PIPELINE_CHAPTERS = 1500
@@ -270,7 +398,7 @@ def strip_leading_duplicate_chapter_heading(body: str, ch_title: str) -> str:
 
 
 def sanitize_chapter_body(body: str) -> str:
-    """Strip HTML comments, decorative asterisk lines, and trim."""
+    """Strip HTML comments, decorative lines, Markdown **bold**, line-leading > / list marks, and `,-` glitches."""
     t = body.strip()
     t = re.sub(r"<!--[\s\S]*?-->", "", t)
     lines_out: list[str] = []
@@ -284,7 +412,16 @@ def sanitize_chapter_body(body: str) -> str:
         if re.fullmatch(r"[\*\s─\-═]+", stripped):
             continue
         lines_out.append(line)
-    return "\n".join(lines_out).strip()
+    out = "\n".join(lines_out).strip()
+    out = strip_markdown_double_asterisk_bold(out)
+    return strip_aiwriter_prose_noise(out)
+
+
+def _chapter_body_plain_from_file(raw_md: str) -> str:
+    """Chapter file text without HTML header, ## title line, for dedupe vs next chapter."""
+    t = clean_stored_chapter_text(raw_md)
+    t = re.sub(r"^#+\s*[^\n]+\n+", "", t.strip(), count=1)
+    return t.strip()
 
 
 def _chapter_heading(title: str, idx: int) -> str:
@@ -309,13 +446,28 @@ def _safe_filename_prefix(title: str) -> str:
     return cleaned
 
 
+def _short_story_reader_engagement_instruction() -> str:
+    """短篇：爽点密度、前置与轮换（策划与正文合同共用）。"""
+    return (
+        "【短篇读者节奏】"
+        "（1）开篇约三百至八百汉字内至少一次「情绪回报」：按题材择一呈现——身份反转、打脸、金手指露头、危机兑现、秘密揭露等；"
+        "此区间内避免纯设定说明或氛围散文堆砌。"
+        "（2）爽点类型须轮换：同一章勿用同一种「爽」反复灌水；采用「小爽→略压或顿挫→更大爽」的微型波浪，整体节奏比中长篇更紧。"
+        "（3）信息前置：读者追读的悬念或利害关系须在标题意象或首段可被感知，勿把核心钩子推迟到大量铺陈之后。"
+        "（4）首次强情绪或信息反馈尽量前移，勿让读者划行过久才得到 payoff；可先给阶段性满足，再以伏笔拉长后文期待，勿倒置。"
+    )
+
+
 def _scale_instruction(length_scale: str) -> str:
     m = {
         "short": "篇幅为短篇：结构紧凑，单线或极少支线，冲突推进快，适合约三万至八万汉字量级的叙事节奏，避免冗长支线。",
         "medium": "篇幅为中篇：可有适度支线与铺陈，节奏介于短篇与长篇之间，注意主线清晰。",
         "long": "篇幅为长篇：允许多线叙事、伏笔与人物弧光充分展开，章节间保持悬念与节奏起伏，避免水文。",
     }
-    return m.get(length_scale, m["medium"])
+    base = m.get(length_scale, m["medium"])
+    if length_scale == "short":
+        return base + "\n" + _short_story_reader_engagement_instruction()
+    return base
 
 
 def _protagonist_instruction(gender: str) -> str:
@@ -376,6 +528,9 @@ def _normalize_chapter_entry(c: dict[str, Any], fallback_idx: int) -> Optional[d
     hook = str(c.get("hook_end", "")).strip()
     if hook:
         out["hook_end"] = hook
+    sfl = str(c.get("space_for_later") or c.get("留白") or "").strip()
+    if sfl:
+        out["space_for_later"] = sfl[:500]
     conflict = str(c.get("conflict", "")).strip()
     if conflict:
         out["conflict"] = conflict
@@ -399,8 +554,18 @@ def _normalize_chapter_entry(c: dict[str, Any], fallback_idx: int) -> Optional[d
     return out
 
 
-def _format_chapter_contract(idx: int, ch: dict[str, Any], *, continuation: bool = False) -> str:
-    tail = "（续写：须自然承接上一章语气和事实，勿重述已交代信息）" if continuation else ""
+def _format_chapter_contract(
+    idx: int,
+    ch: dict[str, Any],
+    *,
+    continuation: bool = False,
+    length_scale: Optional[str] = None,
+) -> str:
+    tail = (
+        "（续写：须自然承接上一章语气和事实，勿重述已交代信息；若上章末为险情或未结动作，须先写清直接后果再转入新场景，禁止无过渡跳切。）"
+        if continuation
+        else ""
+    )
     ch_title = _fallback_chapter_title(ch, idx)
     lines: list[str] = [f"【本章写作合同】第 {idx} 章{tail}"]
     lines.append(
@@ -425,10 +590,207 @@ def _format_chapter_contract(idx: int, ch: dict[str, Any], *, continuation: bool
     hook = str(ch.get("hook_end", "")).strip()
     if hook:
         lines.append(f"【章末钩子】{hook}")
-    lines.append(
-        "【结构提示】开场尽快入戏；中段推进冲突或信息；结尾留情绪落点或悬念，避免「总之/后来」式收尾。"
-    )
+    sfl = str(ch.get("space_for_later") or ch.get("留白") or "").strip()
+    if sfl:
+        lines.append(f"【为后文留白 / 埋钩】\n{sfl}")
+    ls = (length_scale or "").strip().lower()
+    if ls == "short":
+        lines.append(
+            "【结构提示·短篇】除须满足上文【短篇读者节奏】外：开场即陷入可感冲突或悬念；"
+            "中段维持微型波浪；结尾仍须情绪落点或悬念，避免「总之/后来」式收尾。"
+        )
+    else:
+        lines.append(
+            "【结构提示】开场尽快入戏；中段推进冲突或信息；结尾留情绪落点或悬念，避免「总之/后来」式收尾。"
+        )
     return "\n".join(lines)
+
+
+def _continuation_prev_chapter_bridge_instruction(last_chapter_index: int) -> str:
+    """续写时注入：避免上章末险情/断钩与本章策划场景无过渡跳切。"""
+    return (
+        "【续写衔接·强制】\n"
+        f"上文「上一章正文」为第 {last_chapter_index} 章。若该章以险情、对峙、负伤未稳、对话或动作未收束、生死未卜等收笔，"
+        "本章开篇必须在**连续时间线**内先写清直接后果（脱险、救治、晕厥转醒、一方退走、对峙暂歇等均可），篇幅约占全章一成至三成为宜，视烈度自定。\n"
+        "若本章【节拍/要点】要求的新场景、新时段与上章末镜不同，须有**可见的叙事过渡**（时间标注、空间转移的动机与过程），且不得与上章已发生事实矛盾；"
+        "禁止开篇即另起炉灶、风和日丽，仿佛上章末段从未发生。\n"
+    )
+
+
+def plan_continuation_arc(
+    *,
+    root: Path,
+    book_id: str,
+    arc_length: int,
+    temperature: float = 0.55,
+    ideation_level: float = 0.5,
+    user_book_note: str = "",
+) -> dict[str, Any]:
+    """
+    批量续写前：结合梗概、总摘要、跨章提要、结构化开放伏笔与当前 plan，
+    为接下来 arc_length 章生成分章要点（beat / 留白 / 章末钩），并写回 plan.json。
+    """
+    book_path = book_dir(root, book_id)
+    nums = get_chapter_numbers(root, book_id)
+    if not nums:
+        raise HTTPException(404, "本书尚无章节，无法规划续写弧")
+    last_n = max(nums)
+    start_idx = last_n + 1
+    arc_length = max(1, min(int(arc_length), MAX_CONTINUE_CHAPTERS))
+    end_idx = start_idx + arc_length - 1
+
+    plan_data = get_plan(root, book_id)
+    premise = str(plan_data.get("premise") or "")
+    book_title = str(plan_data.get("book_title") or plan_data.get("title") or book_id)
+    meta_p = plan_data.get("meta")
+    planned_total: Optional[int] = None
+    if isinstance(meta_p, dict) and meta_p.get("planned_total_chapters") is not None:
+        try:
+            planned_total = int(meta_p["planned_total_chapters"])
+        except (TypeError, ValueError):
+            planned_total = None
+
+    chs_in = plan_data.get("chapters")
+    tail_lines: list[str] = []
+    if isinstance(chs_in, list):
+        sorted_ch = []
+        for c in chs_in:
+            if isinstance(c, dict):
+                try:
+                    ix = int(c.get("idx", 0))
+                except (TypeError, ValueError):
+                    continue
+                sorted_ch.append((ix, c))
+        sorted_ch.sort(key=lambda x: x[0])
+        for ix, c in sorted_ch[-8:]:
+            bt = re.sub(r"\s+", " ", str(c.get("beat", "")).strip())[:160]
+            tl = str(c.get("title") or "")[:40]
+            tail_lines.append(f"第{ix}章「{tl}」：{bt}")
+    tail_block = "\n".join(tail_lines) if tail_lines else "（plan 中无分章要点）"
+
+    rollup_ex = read_rollup(book_path).strip()[:4200]
+    story_tail = load_chapter_tail_for_prompt(book_path, max_chars=5200) or ""
+    hook_blk = foreshadowing_open_hooks_block(book_path, max_chars=1200)
+    note_s = (user_book_note or "").strip()
+    note_block = f"【用户全书说明】\n{note_s[:2000]}\n" if note_s else ""
+
+    budget_hint = ""
+    if planned_total is not None:
+        budget_hint = f"全书预定总章数为 {planned_total}；当前已写到第 {last_n} 章，本次规划第 {start_idx}–{end_idx} 章，勿超出全书节奏合理性。"
+
+    hook_section = ""
+    if hook_blk.strip():
+        hook_section = "【结构化开放伏笔】\n" + hook_blk + "\n\n"
+
+    last_ch_tail_block = ""
+    last_ch_path = book_path / "chapters" / f"{last_n:02d}.md"
+    if last_ch_path.is_file():
+        try:
+            raw_last = last_ch_path.read_text(encoding="utf-8")
+            plain_last = _chapter_body_plain_from_file(raw_last).strip()
+            if plain_last:
+                tail_plain = plain_last[-2400:] if len(plain_last) > 2400 else plain_last
+                last_ch_tail_block = (
+                    f"【已写正文·第 {last_n} 章尾部（第 {start_idx} 章 beat 须先承接再推进）】\n{tail_plain}\n\n"
+                )
+        except OSError:
+            pass
+
+    sys_p = (
+        "你是长篇小说中观策划。请在既有故事框架下，为接下来连续若干章制定写作要点。\n"
+        "## 必须遵守\n"
+        "1. 每章一条 beat：场景、冲突推进、人物目标变化；与上一阶段 plan 与正文提要衔接。\n"
+        f"1b. 本批第一章为 idx={start_idx}：若上文「已写正文尾部」以险情、对峙或未收束动作结尾，该章 beat 必须先用一两句写清直接后果，再转入新场景，禁止无过渡跳切。\n"
+        "2. space_for_later：本批内为**更后章节**埋的悬念或留白（非本章内细节），可写「无」。\n"
+        "3. hook_end：章末情绪或信息悬念，一句话。\n"
+        "4. 章序 idx 必须从给定起始连续递增，禁止跳号或重复。\n"
+        "## 输出（仅 JSON）\n"
+        '{"arc_notes":"本批弧光与主线推进一两句",'
+        '"chapters":['
+        '{"idx":int,"title":"6~14字章名","beat":"180~280字要点","space_for_later":"string","hook_end":"string"}'
+        "]}\n"
+        "chapters 长度必须等于要求的章数。"
+    )
+    user_p = (
+        f"书名：{book_title}\n{budget_hint}\n"
+        f"{ideation_instruction(ideation_level)}\n"
+        f"{note_block}"
+        f"{last_ch_tail_block}"
+        f"【全书梗概】\n{premise[:3200]}\n\n"
+        f"【plan 近期分章摘要】\n{tail_block}\n\n"
+        f"【记忆宫殿总摘要（摘录）】\n{rollup_ex}\n\n"
+        f"【跨章剧情提要】\n{story_tail[:4500]}\n\n"
+        f"{hook_section}"
+        f"请规划第 {start_idx} 章到第 {end_idx} 章，共 {arc_length} 章；输出 chapters 数组。"
+    )
+    raw = chat_completion(system=sys_p, user=user_p, temperature=temperature)
+    try:
+        data = extract_json_object(raw)
+    except (ValueError, json.JSONDecodeError, TypeError) as e:
+        raise HTTPException(502, f"续写弧规划 JSON 解析失败：{e}") from e
+
+    raw_chapters = data.get("chapters")
+    if not isinstance(raw_chapters, list) or len(raw_chapters) != arc_length:
+        raise HTTPException(
+            502,
+            f"续写弧规划章数不符：需要 {arc_length}，得到 {len(raw_chapters) if isinstance(raw_chapters, list) else 0}",
+        )
+
+    merged_chapters: list[dict[str, Any]] = []
+    if isinstance(chs_in, list):
+        for c in chs_in:
+            if isinstance(c, dict):
+                merged_chapters.append(dict(c))
+    else:
+        merged_chapters = []
+
+    def _idx_of(m: list[dict[str, Any]], idx: int) -> int:
+        for i, x in enumerate(m):
+            try:
+                if int(x.get("idx", 0)) == idx:
+                    return i
+            except (TypeError, ValueError):
+                continue
+        return -1
+
+    updated_indices: list[int] = []
+    for item in raw_chapters:
+        if not isinstance(item, dict):
+            continue
+        try:
+            ix = int(item.get("idx", 0))
+        except (TypeError, ValueError):
+            continue
+        if ix < start_idx or ix > end_idx:
+            continue
+        norm = _normalize_chapter_entry(item, ix)
+        if not norm:
+            continue
+        if "title" not in norm and item.get("title"):
+            norm["title"] = str(item.get("title")).strip()[:120]
+        sfl = str(item.get("space_for_later") or item.get("留白") or "").strip()
+        if sfl:
+            norm["space_for_later"] = sfl[:500]
+        he = str(item.get("hook_end") or "").strip()
+        if he:
+            norm["hook_end"] = he[:300]
+        pos = _idx_of(merged_chapters, ix)
+        if pos >= 0:
+            merged_chapters[pos] = norm
+        else:
+            merged_chapters.append(norm)
+        updated_indices.append(ix)
+
+    merged_chapters.sort(key=lambda x: int(x.get("idx", 0)))
+    plan_data["chapters"] = merged_chapters
+    update_plan(root, book_id, plan_data)
+
+    return {
+        "arc_notes": str(data.get("arc_notes") or "").strip()[:1200],
+        "start_chapter": start_idx,
+        "end_chapter": end_idx,
+        "updated_indices": sorted(set(updated_indices)),
+    }
 
 
 def _plan_from_title_single(
@@ -999,6 +1361,10 @@ def run_pipeline_from_title(
     planned_total_chapters: Optional[int] = None,
     ideation_level: float = 0.5,
     user_book_note: Optional[str] = None,
+    live_supervisor: bool = False,
+    final_supervisor: bool = False,
+    memory_episodic_keep_last: Optional[int] = None,
+    foreshadowing_sync_after_chapter: bool = False,
 ) -> dict[str, Any]:
     """策划 → 逐章写作 → 写入 books/{book_id}/。
     
@@ -1185,9 +1551,9 @@ def run_pipeline_from_title(
     )
 
     saved: list[str] = []
-    running_summary = ""
     orch = read_orchestration_state(root, book_id)
     agent_logs: list[dict[str, Any]] = []
+    live_supervisor_logs: list[dict[str, Any]] = []
 
     chapter_times: list[float] = []
     for ch in chapters:
@@ -1208,10 +1574,11 @@ def run_pipeline_from_title(
                 }
             )
         ch_start = time.perf_counter()
-        contract = _format_chapter_contract(idx, ch, continuation=False)
+        contract = _format_chapter_contract(idx, ch, continuation=False, length_scale=length_scale)
+        sem_q = f"{premise[:900]}\n{contract}"
         mem_book = ""
         if use_long_memory:
-            mem_book = build_memory_context(book_path, max_chars=4200)
+            mem_book = build_memory_context(book_path, max_chars=4200, semantic_query=sem_q)
         mem_parts: list[str] = []
         if kb_block.strip():
             mem_parts.append(kb_block.strip())
@@ -1225,9 +1592,19 @@ def run_pipeline_from_title(
         mem_parts.append(ideation_instruction(ideation_w))
         if macro_for_writing:
             mem_parts.append(_macro_phase_note_for_chapter(idx, macro_for_writing))
+        if length_scale == "short":
+            mem_parts.append(_short_story_reader_engagement_instruction())
+        if length_scale == "long":
+            cl = read_changelog_tail(book_path, max_chars=1200)
+            if cl.strip():
+                mem_parts.append("【设定变更 log（摘录·最近）】\n" + cl.strip())
+            mem_parts.append(long_novel_wiki_memory_instruction())
+        reg_block = build_character_registry_block(book_path, max_chars=3800)
+        mem_parts.append(CHARACTER_REGISTRY_INSTRUCTION + "\n" + reg_block)
+        story_tail = load_chapter_tail_for_prompt(book_path, max_chars=6800)
         mem_parts.append(
             f"【书名】{book_title}\n【全书梗概】\n{premise}\n"
-            f"【已生成前文摘要】\n{running_summary or '（这是第一章，无前文。）'}\n"
+            f"【跨章剧情提要】\n{story_tail or '（为首章或尚无累积提要。）'}\n"
             f"---\n{contract}\n\n"
             "请写本章完整正文；只输出小说正文，不要标题以外的元说明。"
         )
@@ -1248,11 +1625,27 @@ def run_pipeline_from_title(
             raise HTTPException(502, f"第 {idx} 章生成失败: {e}") from e
 
         cleaned = sanitize_chapter_body(body)
+        if idx > 1:
+            prev_path = book_path / "chapters" / f"{idx - 1:02d}.md"
+            if prev_path.is_file():
+                try:
+                    prev_plain = _chapter_body_plain_from_file(prev_path.read_text(encoding="utf-8"))
+                    cleaned = strip_common_prefix_with_previous_opening(prev_plain, cleaned)
+                except OSError:
+                    pass
         cleaned = strip_leading_duplicate_chapter_heading(cleaned, ch_title)
         content = _chapter_heading(ch_title, idx) + cleaned + "\n"
         write_chapter(root, book_id, idx, content)
         saved.append(str(book_path / "chapters" / f"{idx:02d}.md"))
         agent_logs.append({"chapter": idx, "log": alog})
+        try:
+            append_agent_orchestration_log(
+                root,
+                book_id,
+                {"chapter": idx, "ts": time.time(), "log": compact_agent_log(alog)},
+            )
+        except OSError:
+            logger.debug("append_agent_orchestration_log failed", exc_info=True)
 
         elapsed = time.perf_counter() - ch_start
         chapter_times.append(elapsed)
@@ -1268,8 +1661,30 @@ def run_pipeline_from_title(
                 }
             )
 
+        ent = _live_supervisor_after_chapter(
+            live_supervisor=live_supervisor,
+            book_title=book_title,
+            chapter_index=idx,
+            chapter_title=ch_title,
+            beat=str(ch.get("beat") or ""),
+            premise=premise,
+            chapter_plain=cleaned,
+            alog=alog,
+            progress_cb=progress_cb,
+        )
+        if ent is not None:
+            live_supervisor_logs.append(ent)
+            try:
+                maybe_append_changelog_after_supervisor(
+                    book_path,
+                    length_scale=length_scale,
+                    chapter_index=idx,
+                    supervisor_entry=ent,
+                )
+            except Exception:
+                logger.debug("canon changelog append failed", exc_info=True)
+
         snippet = cleaned.replace("\n", " ")[:320]
-        running_summary += f"\n第{idx}章「{ch_title}」：{snippet}"
         orch = orchestrator_bump_state(orch, step="chapter_draft", chapter=idx)
         write_orchestration_state(root, book_id, orch)
 
@@ -1280,9 +1695,65 @@ def run_pipeline_from_title(
             _sync_book_memory_entries(
                 book_path, str(idx), cleaned, temperature=0.38, chapter_title=ch_title
             )
+        try:
+            append_chapter_tail_snippet(
+                book_path, chapter_n=idx, chapter_title=ch_title, snippet=snippet
+            )
+            maybe_compress_chapter_tail(book_path)
+        except OSError:
+            logger.debug("chapter tail append/compress failed", exc_info=True)
+        try:
+            auto_seed_characters_after_chapter(
+                book_path, chapter_idx=idx, chapter_plain_text=cleaned
+            )
+        except Exception:
+            logger.debug("character auto_seed failed", exc_info=True)
+        try:
+            bump_character_mentions_from_plain(book_path, idx, cleaned)
+        except Exception:
+            logger.debug("character mention bump failed", exc_info=True)
+
+        if foreshadowing_sync_after_chapter and sync_book_memory:
+            try:
+                sync_foreshadowing_after_chapter(
+                    book_root=book_path,
+                    chapter_label=str(idx),
+                    chapter_plain=cleaned,
+                    premise=premise,
+                    temperature=0.28,
+                )
+            except Exception:
+                logger.debug("foreshadowing sync failed", exc_info=True)
+        if memory_episodic_keep_last is not None and int(memory_episodic_keep_last) >= 1 and sync_book_memory:
+            try:
+                prune_episodic_extraction_entries(
+                    book_path, keep_last=int(memory_episodic_keep_last)
+                )
+            except Exception:
+                logger.debug("memory episodic prune failed", exc_info=True)
+
+        if length_scale == "long" and sync_book_memory and idx > 0 and idx % 50 == 0:
+            try:
+                cr = maybe_wiki_compile_episodic_batch(
+                    book_path,
+                    milestone_chapter=idx,
+                    book_title=book_title,
+                    premise=premise,
+                    temperature=0.35,
+                )
+                if progress_cb and isinstance(cr, dict) and cr.get("ok"):
+                    progress_cb({"event": "wiki_compile", "chapter": idx, "wiki_compile": cr})
+            except Exception as e:
+                logger.warning("wiki compile at chapter %s: %s", idx, e)
+
+    supervisor_final: dict[str, Any] | None = None
+    if final_supervisor:
+        supervisor_final = _final_supervisor_for_book(
+            root=root, book_id=book_id, progress_cb=progress_cb
+        )
 
     prefix = _safe_filename_prefix(book_title)
-    return {
+    out: dict[str, Any] = {
         "book_id": book_id,
         "book_title": book_title,
         "premise": premise,
@@ -1302,6 +1773,11 @@ def run_pipeline_from_title(
         "user_book_note": note_s,
         "agent_logs": agent_logs,
     }
+    if live_supervisor_logs:
+        out["live_supervisor"] = live_supervisor_logs
+    if supervisor_final is not None:
+        out["supervisor_final"] = supervisor_final
+    return out
 
 
 def run_continue_next_chapter(
@@ -1318,6 +1794,11 @@ def run_continue_next_chapter(
     sync_book_memory: bool = True,
     run_reader_test: bool = False,
     ideation_level: Optional[float] = None,
+    live_supervisor: bool = False,
+    final_supervisor: bool = False,
+    progress_cb: ProgressCb = None,
+    memory_episodic_keep_last: Optional[int] = None,
+    foreshadowing_sync_after_chapter: bool = False,
 ) -> dict[str, Any]:
     book_path = book_dir(root, book_id)
     voice_block = ""
@@ -1353,6 +1834,12 @@ def run_continue_next_chapter(
     ideation_w = max(0.0, min(1.0, float(iw_raw)))
     premise = str(plan_data.get("premise") or "")
     book_title = str(plan_data.get("book_title") or plan_data.get("title") or book_id)
+    length_scale_cont = "medium"
+    meta_ls = plan_data.get("meta")
+    if isinstance(meta_ls, dict):
+        ls0 = str(meta_ls.get("length_scale") or "").strip().lower()
+        if ls0 in ("short", "medium", "long"):
+            length_scale_cont = ls0
     beat_next = ""
     plan_chapter: Optional[dict[str, Any]] = None
     chs = plan_data.get("chapters")
@@ -1374,6 +1861,7 @@ def run_continue_next_chapter(
         sys_b = (
             "你是小说编辑。根据梗概与上一章正文，只输出下一章的情节要点（180-260字），"
             "包含场景、冲突推进与章末悬念；不要写小说正文，不要列表套话。"
+            "若上一章尾部为险情、对峙或未收束动作，要点中须先用一两句交代「承接上章末的直接后果」，再写本章新推进，不得从无关新场景零过渡起笔。"
             f" {PLANNER_ORIGINALITY_CONTRACT}"
         )
         tail = last_text.strip()[-2800:] if len(last_text) > 2800 else last_text.strip()
@@ -1413,15 +1901,18 @@ def run_continue_next_chapter(
         chapter_for_contract = {**plan_chapter, "idx": next_n, "beat": beat_next, "title": title_next}
     else:
         chapter_for_contract = {"idx": next_n, "beat": beat_next, "title": title_next}
-    contract_block = _format_chapter_contract(next_n, chapter_for_contract, continuation=True)
+    contract_block = _format_chapter_contract(
+        next_n, chapter_for_contract, continuation=True, length_scale=length_scale_cont
+    )
 
     system = writer_system.strip()
     if theme_addon.strip():
         system = f"{system}\n\n【题材约束】\n{theme_addon.strip()}"
 
+    sem_q = f"{(premise or '')[:900]}\n{contract_block}\n{beat_next[:700]}"
     mem_book = ""
     if use_long_memory:
-        mem_book = build_memory_context(book_path, max_chars=4200)
+        mem_book = build_memory_context(book_path, max_chars=4200, semantic_query=sem_q)
     parts: list[str] = []
     if kb_block.strip():
         parts.append(kb_block.strip())
@@ -1433,12 +1924,26 @@ def run_continue_next_chapter(
     if voice_block.strip():
         parts.append(voice_block.strip()[:7000])
     parts.append(ideation_instruction(ideation_w))
+    if length_scale_cont == "short":
+        parts.append(_short_story_reader_engagement_instruction())
+    if length_scale_cont == "long":
+        clc = read_changelog_tail(book_path, max_chars=1200)
+        if clc.strip():
+            parts.append("【设定变更 log（摘录·最近）】\n" + clc.strip())
+        parts.append(long_novel_wiki_memory_instruction())
+    reg_block = build_character_registry_block(book_path, max_chars=3800)
+    parts.append(CHARACTER_REGISTRY_INSTRUCTION + "\n" + reg_block)
+    story_tail = load_chapter_tail_for_prompt(book_path, max_chars=6800)
+    if story_tail.strip():
+        parts.append("【跨章剧情提要】\n" + story_tail.strip())
     prev_for_ctx = last_text.strip()
     if len(prev_for_ctx) > 14000:
         prev_for_ctx = prev_for_ctx[-14000:]
+    bridge = _continuation_prev_chapter_bridge_instruction(last_n)
     parts.append(
         f"【书名】{book_title}\n【全书梗概】\n{premise or '（无策划梗概时请紧扣上一章衔接。）'}\n"
         f"【上一章正文】第 {last_n} 章\n{prev_for_ctx}\n"
+        f"{bridge}"
         f"---\n{contract_block}\n\n"
         "请写本章完整正文，自然承接；只输出小说正文，不要标题以外的元说明。"
     )
@@ -1459,19 +1964,43 @@ def run_continue_next_chapter(
         raise HTTPException(502, f"第 {next_n} 章续写失败: {e}") from e
 
     cleaned = sanitize_chapter_body(body)
+    try:
+        prev_plain = _chapter_body_plain_from_file(last_path.read_text(encoding="utf-8"))
+        cleaned = strip_common_prefix_with_previous_opening(prev_plain, cleaned)
+    except OSError:
+        pass
     cleaned = strip_leading_duplicate_chapter_heading(cleaned, title_next)
     content = _chapter_heading(title_next, next_n) + cleaned + "\n"
     write_chapter(root, book_id, next_n, content)
+    try:
+        append_agent_orchestration_log(
+            root,
+            book_id,
+            {"chapter": next_n, "ts": time.time(), "log": compact_agent_log(alog)},
+        )
+    except OSError:
+        logger.debug("append_agent_orchestration_log failed", exc_info=True)
 
     try:
         if isinstance(chs, list):
             if not any(isinstance(x, dict) and int(x.get("idx", 0)) == next_n for x in chs):
-                chs.append({"idx": next_n, "beat": beat_next[:800], "title": title_next})
+                row: dict[str, Any] = {"idx": next_n, "beat": beat_next[:800], "title": title_next}
+                if plan_chapter:
+                    if plan_chapter.get("space_for_later"):
+                        row["space_for_later"] = str(plan_chapter["space_for_later"])[:500]
+                    if plan_chapter.get("hook_end"):
+                        row["hook_end"] = str(plan_chapter["hook_end"])[:300]
+                chs.append(row)
             else:
                 for x in chs:
                     if isinstance(x, dict) and int(x.get("idx", 0)) == next_n:
                         x["beat"] = beat_next[:800]
                         x["title"] = title_next
+                        if plan_chapter:
+                            if plan_chapter.get("space_for_later"):
+                                x["space_for_later"] = str(plan_chapter["space_for_later"])[:500]
+                            if plan_chapter.get("hook_end"):
+                                x["hook_end"] = str(plan_chapter["hook_end"])[:300]
                         break
             plan_data["chapters"] = chs
             update_plan(root, book_id, plan_data)
@@ -1485,6 +2014,28 @@ def run_continue_next_chapter(
     )
     write_orchestration_state(root, book_id, orch)
 
+    ent = _live_supervisor_after_chapter(
+        live_supervisor=live_supervisor,
+        book_title=book_title,
+        chapter_index=next_n,
+        chapter_title=title_next,
+        beat=beat_next,
+        premise=premise,
+        chapter_plain=cleaned,
+        alog=alog,
+        progress_cb=progress_cb,
+    )
+    if ent is not None:
+        try:
+            maybe_append_changelog_after_supervisor(
+                book_path,
+                length_scale=length_scale_cont,
+                chapter_index=next_n,
+                supervisor_entry=ent,
+            )
+        except Exception:
+            logger.debug("canon changelog append failed", exc_info=True)
+
     if sync_book_memory:
         snippet = cleaned.replace("\n", " ")[:320]
         _append_rollup_chapter_snippet(
@@ -1493,8 +2044,61 @@ def run_continue_next_chapter(
         _sync_book_memory_entries(
             book_path, str(next_n), cleaned, temperature=0.38, chapter_title=title_next
         )
+    try:
+        append_chapter_tail_snippet(
+            book_path,
+            chapter_n=next_n,
+            chapter_title=title_next,
+            snippet=cleaned.replace("\n", " ")[:320],
+        )
+        maybe_compress_chapter_tail(book_path)
+    except OSError:
+        logger.debug("chapter tail append/compress failed", exc_info=True)
+    try:
+        auto_seed_characters_after_chapter(
+            book_path, chapter_idx=next_n, chapter_plain_text=cleaned
+        )
+    except Exception:
+        logger.debug("character auto_seed failed", exc_info=True)
+    try:
+        bump_character_mentions_from_plain(book_path, next_n, cleaned)
+    except Exception:
+        logger.debug("character mention bump failed", exc_info=True)
 
-    return {
+    if foreshadowing_sync_after_chapter and sync_book_memory:
+        try:
+            sync_foreshadowing_after_chapter(
+                book_root=book_path,
+                chapter_label=str(next_n),
+                chapter_plain=cleaned,
+                premise=premise,
+                temperature=0.28,
+            )
+        except Exception:
+            logger.debug("foreshadowing sync failed", exc_info=True)
+    if memory_episodic_keep_last is not None and int(memory_episodic_keep_last) >= 1 and sync_book_memory:
+        try:
+            prune_episodic_extraction_entries(
+                book_path, keep_last=int(memory_episodic_keep_last)
+            )
+        except Exception:
+            logger.debug("memory episodic prune failed", exc_info=True)
+
+    if length_scale_cont == "long" and sync_book_memory and next_n > 0 and next_n % 50 == 0:
+        try:
+            cr = maybe_wiki_compile_episodic_batch(
+                book_path,
+                milestone_chapter=next_n,
+                book_title=book_title,
+                premise=premise,
+                temperature=0.35,
+            )
+            if progress_cb and isinstance(cr, dict) and cr.get("ok"):
+                progress_cb({"event": "wiki_compile", "chapter": next_n, "wiki_compile": cr})
+        except Exception as e:
+            logger.warning("wiki compile at chapter %s: %s", next_n, e)
+
+    out: dict[str, Any] = {
         "book_id": book_id,
         "book_title": book_title,
         "chapter_index": next_n,
@@ -1503,6 +2107,13 @@ def run_continue_next_chapter(
         "series_prefix": _safe_filename_prefix(book_title),
         "agent_log": alog,
     }
+    if ent is not None:
+        out["live_supervisor"] = [ent]
+    if final_supervisor:
+        out["supervisor_final"] = _final_supervisor_for_book(
+            root=root, book_id=book_id, progress_cb=progress_cb
+        )
+    return out
 
 
 def run_continue_chapters(
@@ -1521,11 +2132,57 @@ def run_continue_chapters(
     run_reader_test: bool = False,
     progress_cb: ProgressCb = None,
     ideation_level: Optional[float] = None,
+    live_supervisor: bool = False,
+    final_supervisor: bool = False,
+    continuation_arc_plan: bool = True,
+    memory_episodic_keep_last: Optional[int] = 48,
+    foreshadowing_sync_after_chapter: bool = True,
 ) -> dict[str, Any]:
     """续写多章：逐章调用 run_continue_next_chapter。"""
     n = max(1, min(int(count), MAX_CONTINUE_CHAPTERS))
+    plan0 = get_plan(root, book_id)
+    iw_raw = ideation_level
+    if iw_raw is None:
+        meta_p0 = plan0.get("meta")
+        if isinstance(meta_p0, dict) and meta_p0.get("ideation_level") is not None:
+            try:
+                iw_raw = float(meta_p0["ideation_level"])
+            except (TypeError, ValueError):
+                iw_raw = 0.5
+        else:
+            iw_raw = 0.5
+    ideation_w = max(0.0, min(1.0, float(iw_raw)))
+
+    user_arc_note = ""
+    um = get_meta(root, book_id)
+    if isinstance(um, dict):
+        user_arc_note = str(um.get("user_book_note") or "").strip()
+    if not user_arc_note:
+        mp0 = plan0.get("meta")
+        if isinstance(mp0, dict):
+            user_arc_note = str(mp0.get("user_book_note") or "").strip()
+
+    arc_meta: dict[str, Any] | None = None
+    if continuation_arc_plan and n > 1:
+        try:
+            arc_meta = plan_continuation_arc(
+                root=root,
+                book_id=book_id,
+                arc_length=n,
+                temperature=min(0.68, float(writing_temp)),
+                ideation_level=ideation_w,
+                user_book_note=user_arc_note,
+            )
+            if progress_cb:
+                progress_cb({"event": "continuation_arc", "plan": arc_meta})
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning("plan_continuation_arc failed: %s", e)
+
     results: list[dict[str, Any]] = []
     last: dict[str, Any] = {}
+    live_supervisor_logs: list[dict[str, Any]] = []
     for i in range(n):
         if progress_cb:
             progress_cb({"event": "continue_begin", "i": i + 1, "total": n})
@@ -1542,7 +2199,15 @@ def run_continue_chapters(
             sync_book_memory=sync_book_memory,
             run_reader_test=run_reader_test,
             ideation_level=ideation_level,
+            live_supervisor=live_supervisor,
+            final_supervisor=False,
+            progress_cb=progress_cb,
+            memory_episodic_keep_last=memory_episodic_keep_last,
+            foreshadowing_sync_after_chapter=foreshadowing_sync_after_chapter,
         )
+        ls = last.get("live_supervisor")
+        if isinstance(ls, list):
+            live_supervisor_logs.extend(ls)
         results.append(
             {
                 "chapter_index": last.get("chapter_index"),
@@ -1552,13 +2217,25 @@ def run_continue_chapters(
         )
         if progress_cb:
             progress_cb({"event": "continue_end", "i": i + 1, "total": n, "chapter": last})
-    return {
+    last_public = {
+        k: v for k, v in last.items() if k not in ("live_supervisor", "supervisor_final")
+    }
+    out: dict[str, Any] = {
         "book_id": book_id,
         "book_title": last.get("book_title"),
         "chapters_written": n,
         "chapters": results,
-        "last": last,
+        "last": last_public,
     }
+    if arc_meta is not None:
+        out["continuation_arc"] = arc_meta
+    if live_supervisor_logs:
+        out["live_supervisor"] = live_supervisor_logs
+    if final_supervisor:
+        out["supervisor_final"] = _final_supervisor_for_book(
+            root=root, book_id=book_id, progress_cb=progress_cb
+        )
+    return out
 
 
 def run_continue_next_chapter_legacy_out(
@@ -1623,6 +2300,13 @@ def run_continue_next_chapter_legacy_out(
             iw_raw = 0.5
     ideation_w = max(0.0, min(1.0, float(iw_raw)))
 
+    length_scale_legacy = "medium"
+    meta_lg = plan_data.get("meta")
+    if isinstance(meta_lg, dict):
+        lsg = str(meta_lg.get("length_scale") or "").strip().lower()
+        if lsg in ("short", "medium", "long"):
+            length_scale_legacy = lsg
+
     last_text = last_path.read_text(encoding="utf-8")
     if last_text.strip().startswith("<!--"):
         close = last_text.find("-->")
@@ -1633,6 +2317,7 @@ def run_continue_next_chapter_legacy_out(
         sys_b = (
             "你是小说编辑。根据梗概与上一章正文，只输出下一章的情节要点（180-260字），"
             "包含场景、冲突推进与章末悬念；不要写小说正文，不要列表套话。"
+            "若上一章尾部为险情、对峙或未收束动作，要点中须先用一两句交代「承接上章末的直接后果」，再写本章新推进，不得从无关新场景零过渡起笔。"
             f" {PLANNER_ORIGINALITY_CONTRACT}"
         )
         tail = last_text.strip()[-2800:] if len(last_text) > 2800 else last_text.strip()
@@ -1660,12 +2345,16 @@ def run_continue_next_chapter_legacy_out(
     if use_long_memory and memory_context.strip():
         parts.append(memory_context.strip())
     parts.append(ideation_instruction(ideation_w))
+    if length_scale_legacy == "short":
+        parts.append(_short_story_reader_engagement_instruction())
     prev_for_ctx = last_text.strip()
     if len(prev_for_ctx) > 14000:
         prev_for_ctx = prev_for_ctx[-14000:]
+    bridge = _continuation_prev_chapter_bridge_instruction(last_n)
     parts.append(
         f"【书名】{book_title}\n【全书梗概】\n{premise or '（无策划梗概时请紧扣上一章衔接。）'}\n"
         f"【上一章正文】第 {last_n} 章\n{prev_for_ctx}\n"
+        f"{bridge}"
         f"---\n【本章任务】第 {next_n} 章（续写，承接上文）\n{beat_next}\n\n"
         "请写本章完整正文，自然承接；只输出小说正文，不要标题以外的元说明。"
     )
@@ -1692,6 +2381,11 @@ def run_continue_next_chapter_legacy_out(
     fpath = out_dir / Path(fname).name
     title_line = f"第 {next_n} 章"
     cleaned = sanitize_chapter_body(body)
+    try:
+        prev_plain = _chapter_body_plain_from_file(last_path.read_text(encoding="utf-8"))
+        cleaned = strip_common_prefix_with_previous_opening(prev_plain, cleaned)
+    except OSError:
+        pass
     cleaned = strip_leading_duplicate_chapter_heading(cleaned, title_line)
     out_text = f"## {title_line}\n\n{cleaned}\n"
     try:

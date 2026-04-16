@@ -362,6 +362,92 @@ def get_relationships(book_root: Path, char_name: str) -> dict[str, str]:
 # Context Building
 # =============================================================================
 
+CHARACTER_REGISTRY_INSTRUCTION = (
+    "【人物专名表·写作前须查】\n"
+    "以下为本书 `characters/` 已建档人物摘要。凡后文再次写到的**同一人物**，专名须与表中**完全一致**；"
+    "禁止用「某公公」「李公公」等泛称顶替表中已有专名（如已列「冯保」则须写「冯保」或文中已用的「冯公公」称谓体系，与表一致）。\n"
+    "若本章引入**表中尚未列出**且有对白或多次描写的重要人物，可使用新专名写作；作者稍后在书库人物档案中补录即可。\n"
+)
+
+
+def build_character_registry_block(book_root: Path, *, max_chars: int = 4500) -> str:
+    """拼入 Writer：全书已建档人物一览（按首见章排序），用于专名一致。"""
+    index = _load_index(book_root)
+    rows = list(index.get("characters") or [])
+    if not rows:
+        return "（本书尚无 `characters/index.json` 人物索引；新专名请事后建档以免漂移。）\n"
+
+    def _sort_key(r: dict[str, Any]) -> tuple[int, str]:
+        try:
+            fc = int(r.get("first_appear_chapter") or 9999)
+        except (TypeError, ValueError):
+            fc = 9999
+        return (fc, str(r.get("name") or ""))
+
+    rows.sort(key=_sort_key)
+    lines: list[str] = ["【本书人物表·摘录】"]
+    used = 0
+    for r in rows:
+        name = str(r.get("name") or "").strip()
+        if not name:
+            continue
+        prof = load_character_profile(book_root, name)
+        try:
+            fc = int((prof or r).get("first_appear_chapter") or r.get("first_appear_chapter") or 0)
+        except (TypeError, ValueError):
+            fc = 0
+        try:
+            lc = int((prof or r).get("last_mentioned_chapter") or r.get("last_mentioned_chapter") or fc)
+        except (TypeError, ValueError):
+            lc = fc
+        bits: list[str] = []
+        if prof:
+            if prof.get("appearance"):
+                bits.append(str(prof["appearance"])[:80])
+            if prof.get("notes"):
+                bits.append(str(prof["notes"])[:120])
+            if prof.get("motivation"):
+                bits.append(str(prof["motivation"])[:80])
+        one = "；".join(bits) if bits else "（档案待补）"
+        line = f"· 「{name}」首见第{fc}章｜最近第{lc}章｜{one}"
+        if used + len(line) > max_chars - 80:
+            lines.append("…（人物表过长已截断，完整见本书 characters/ 目录）")
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines) + "\n"
+
+
+def bump_character_mentions_from_plain(book_root: Path, chapter_idx: int, chapter_plain: str) -> int:
+    """据正文子串更新已建档人物的 last_mentioned_chapter（专名长度≥2）。"""
+    plain = (chapter_plain or "").strip()
+    if len(plain) < 80:
+        return 0
+    names = [str(c.get("name") or "").strip() for c in list_characters(book_root)]
+    names = [n for n in names if len(n) >= 2]
+    names.sort(key=len, reverse=True)
+    updated = 0
+    for name in names:
+        if name not in plain:
+            continue
+        prof = load_character_profile(book_root, name)
+        if not prof:
+            continue
+        try:
+            prev = int(prof.get("last_mentioned_chapter") or 0)
+        except (TypeError, ValueError):
+            prev = 0
+        new_last = max(chapter_idx, prev)
+        if new_last <= prev:
+            continue
+        try:
+            update_character_profile(book_root, name, {"last_mentioned_chapter": new_last})
+            updated += 1
+        except HTTPException:
+            pass
+    return updated
+
+
 def build_character_context(
     book_root: Path,
     scene_characters: list[str],
