@@ -275,6 +275,60 @@
                 </div>
               </div>
               <pre id="continue-log" class="pipeline-log" hidden></pre>
+
+              <h3 class="sub-block-title">重写已有章节</h3>
+              <p class="rail-hint">
+                仅支持<strong>书本（新库）</strong>。按 <span class="inline-code">plan.json</span> 中该章要点重新生成正文并<strong>覆盖</strong>
+                <span class="inline-code">chapters/NN.md</span>；不写新章号。章号留空表示重写当前<strong>最后一章</strong>。左侧勾选的知识库会参与重写。
+              </p>
+              <div class="form-grid">
+                <div class="form-col-span2">
+                  <label class="lbl" for="series-rewrite-select">书本</label>
+                  <select id="series-rewrite-select" class="inp inp-select">
+                    <option value="">—— 与上方列表同步，请先刷新 ——</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="lbl" for="rewrite-chapter-index">章号</label>
+                  <input
+                    type="number"
+                    id="rewrite-chapter-index"
+                    class="inp"
+                    min="1"
+                    placeholder="留空 = 末章"
+                  />
+                </div>
+                <div>
+                  <label class="lbl" for="rewrite-agent-profile">重写编排模式</label>
+                  <select id="rewrite-agent-profile" class="inp inp-select">
+                    <option value="fast" selected>快速（单写作智能体）</option>
+                    <option value="full">完整（Character / Lore / Editor / Safety 链）</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="lbl" for="rewrite-reader-test">&nbsp;</label>
+                  <label class="chk-row chk-row--tight" style="margin: 0; padding-top: 0.35rem">
+                    <input type="checkbox" id="rewrite-reader-test" />
+                    <span>追加盲测读者（仅 full，额外 API）</span>
+                  </label>
+                </div>
+                <div class="form-col-span2">
+                  <label class="chk-row chk-row--tight">
+                    <input type="checkbox" id="rewrite-live-supervisor" checked />
+                    <span>完成后监督快审（额外 API）</span>
+                  </label>
+                </div>
+                <div class="form-col-span2">
+                  <label class="chk-row chk-row--tight">
+                    <input type="checkbox" id="cb-rewrite-memory" checked />
+                    <span>重写时注入长期记忆</span>
+                  </label>
+                </div>
+                <div class="form-actions">
+                  <button type="button" class="btn btn-primary" id="btn-rewrite-chapter">开始重写</button>
+                </div>
+              </div>
+              <pre id="rewrite-log" class="pipeline-log" hidden></pre>
             </section>
 
             <details class="manual-panel">

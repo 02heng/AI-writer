@@ -12,7 +12,7 @@ from typing import Iterable, Iterator, Optional
 import httpx
 
 try:
-    from openai import APIConnectionError, APITimeoutError, OpenAI
+    from openai import APIConnectionError, APITimeoutError, BadRequestError, OpenAI
 
     HAS_OPENAI = True
 except ImportError:
@@ -24,6 +24,7 @@ except ImportError:
 
     APIConnectionError = _OpenAIImportStub  # type: ignore[misc, assignment]
     APITimeoutError = _OpenAIImportStub  # type: ignore[misc, assignment]
+    BadRequestError = _OpenAIImportStub  # type: ignore[misc, assignment]
 
 from ..core.logging import get_logger
 from .providers import (
@@ -147,33 +148,126 @@ def reset_llm_client_cache() -> None:
     _client_config_key = None
 
 
+def writer_completion_max_tokens() -> int:
+    """章节正文希望申请的 max_tokens 上限（实际发送前会再按上下文收紧）。
+
+    单条回复的 API 上限常见为 8192；若与超长 prompt 相加超过模型上下文，服务商可能仍返回
+    与 max_tokens 相关的 400，故 chat_completion 内会动态 clamp。
+    """
+    return _env_int("AIWRITER_WRITER_MAX_TOKENS", 8192, 1, 8192)
+
+
+def _estimate_prompt_tokens(system: str, user: str) -> int:
+    """无 tokenizer 时对 prompt 长度的保守估计（略高估输入更安全）。"""
+    n = len(system) + len(user)
+    per = _env_float("AIWRITER_PROMPT_TOKENS_PER_CHAR", 0.65)
+    per = max(0.25, min(per, 1.5))
+    return max(1, int(n * per))
+
+
+def _clamp_max_tokens_to_context(
+    requested: int,
+    *,
+    system: str,
+    user: str,
+) -> int:
+    """保证 prompt + max_tokens 不易超过模型上下文；并遵守单条 max_tokens API 上限。"""
+    api_max = _env_int("AIWRITER_COMPLETION_MAX_API", 8192, 1024, 8192)
+    ctx = _env_int("AIWRITER_MODEL_CONTEXT_TOKENS", 28000, 4096, 200000)
+    reserve = _env_int("AIWRITER_COMPLETION_RESERVE", 384, 64, 8192)
+    est_in = _estimate_prompt_tokens(system, user)
+    room = ctx - est_in - reserve
+    if room < 1:
+        room = 1
+    cap = min(max(1, requested), api_max, room)
+    if cap < requested:
+        logger.warning(
+            "llm.chat_completion clamp max_tokens %s -> %s (est_prompt_tokens~%s ctx=%s)",
+            requested,
+            cap,
+            est_in,
+            ctx,
+        )
+    return cap
+
+
+def _is_max_tokens_bad_request(exc: BaseException) -> bool:
+    s = str(exc).lower()
+    return "max_tokens" in s and ("invalid" in s or "400" in s)
+
+
 def chat_completion(
     *,
     system: str,
     user: str,
     model: str | None = None,
     temperature: float = 0.8,
+    max_tokens: int | None = None,
 ) -> str:
     """Send a chat completion request using DeepSeek."""
     m = model or DEFAULT_MODEL
     app_retries = _env_int("AIWRITER_LLM_APP_RETRIES", 3, 1, 8)
     last_exc: BaseException | None = None
 
+    mt_initial: int | None = None
+    if max_tokens is not None:
+        mt_initial = _clamp_max_tokens_to_context(max(1, int(max_tokens)), system=system, user=user)
+
+    def _one_call(use_mt: int | None) -> str:
+        client = get_client()
+        create_kw: dict = {
+            "model": m,
+            "temperature": temperature,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        if use_mt is not None:
+            create_kw["max_tokens"] = use_mt
+        resp = client.chat.completions.create(**create_kw)
+        choice = resp.choices[0]
+        if not choice.message or not choice.message.content:
+            return ""
+        return choice.message.content.strip()
+
+    def _call_with_max_tokens_downshift(start_mt: int | None) -> str:
+        """先按 start_mt 请求；若仍报 max_tokens 无效则减半直至省略参数。"""
+        cur = start_mt
+        last_br: BaseException | None = None
+        for _ in range(8):
+            try:
+                return _one_call(cur)
+            except BadRequestError as e:
+                last_br = e
+                if cur is not None and _is_max_tokens_bad_request(e):
+                    if cur > 1024:
+                        nxt = max(512, cur // 2)
+                        if nxt < cur:
+                            logger.warning(
+                                "llm.chat_completion max_tokens rejected, retry %s -> %s",
+                                cur,
+                                nxt,
+                                extra={"err": str(e)[:280]},
+                            )
+                            cur = nxt
+                            continue
+                    logger.warning(
+                        "llm.chat_completion max_tokens rejected, retry without max_tokens",
+                        extra={"err": str(e)[:280]},
+                    )
+                    cur = None
+                    continue
+                raise
+        if last_br is not None:
+            raise last_br
+        raise RuntimeError("chat_completion: exhausted max_tokens downshift without result")
+
     for attempt in range(app_retries):
         try:
-            client = get_client()
-            resp = client.chat.completions.create(
-                model=m,
-                temperature=temperature,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            )
-            choice = resp.choices[0]
-            if not choice.message or not choice.message.content:
-                return ""
-            return choice.message.content.strip()
+            return _call_with_max_tokens_downshift(mt_initial)
+        except BadRequestError:
+            raise
         except (APIConnectionError, APITimeoutError) as e:
             last_exc = e
             reset_llm_client_cache()
@@ -221,6 +315,7 @@ __all__ = [
     "LLMTransportError",
     "get_client",
     "reset_llm_client_cache",
+    "writer_completion_max_tokens",
     "chat_completion",
     "stream_chat_completion",
     "DEEPSEEK_BASE_URL",

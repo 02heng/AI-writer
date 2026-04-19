@@ -212,6 +212,16 @@ class TestChapterContract:
         result = _format_chapter_contract(1, chapter)
         assert "【结构提示】" in result
         assert "结构提示·短篇" not in result
+        assert "【篇幅目标】" in result
+        assert "2000～4000" in result
+
+    def test_format_chapter_contract_short_includes_wordcount_target(self) -> None:
+        from app.pipeline import _format_chapter_contract
+
+        chapter = {"idx": 1, "beat": "开局冲突"}
+        result = _format_chapter_contract(1, chapter, length_scale="short")
+        assert "【篇幅目标】" in result
+        assert "2000～4000" in result
 
 
 class TestNormalizeChapterEntry:

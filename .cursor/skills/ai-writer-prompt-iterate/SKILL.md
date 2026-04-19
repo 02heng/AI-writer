@@ -42,3 +42,8 @@ description: >-
 ## 延伸阅读
 
 - 详细检查项：[reference/checklist.md](reference/checklist.md)
+
+## 网文爽文 / 言情（已融入仓库）
+
+- **Writer**：`writer.md` 含「网文爽文与言情（条件激活）」；策划侧见 `pipeline.py` 中 `PLANNER_ORIGINALITY_CONTRACT` 对通俗叙事与感情线阶段的约束。
+- **编排**：`agents.py` 中 Character 润色、Editor 评估维度；`supervisor.py` 逐章快审任务含爽文/言情检视。改上述任一处时请同步 checklist 与 manifest 版本。

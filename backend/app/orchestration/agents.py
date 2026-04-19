@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 from ..jsonutil import extract_json_object
-from ..llm import chat_completion
+from ..llm import chat_completion, writer_completion_max_tokens
 
 
 def agent_writer_draft(
@@ -13,7 +13,12 @@ def agent_writer_draft(
     user_payload: str,
     temperature: float,
 ) -> str:
-    return chat_completion(system=system, user=user_payload, temperature=temperature)
+    return chat_completion(
+        system=system,
+        user=user_payload,
+        temperature=temperature,
+        max_tokens=writer_completion_max_tokens(),
+    )
 
 
 def agent_character_polish(*, chapter_text: str, premise: str, temperature: float = 0.55) -> str:
@@ -26,6 +31,7 @@ def agent_character_polish(*, chapter_text: str, premise: str, temperature: floa
         "1. 口癖与说话节奏：每人是否有可区分的用语习惯、句式长度。\n"
         "2. 关系张力：对话是否体现地位、隐瞒、试探或冲突。\n"
         "3. 信息差：谁此刻知道什么、谁说漏嘴或打哑谜是否合理。\n"
+        "4. 言情向（若梗概或本章明显为感情线）：称呼与语气是否随关系变化；是否避免工业糖精式空洞情话堆砌。\n"
         "## 输出\n"
         "只输出修订后的本章正文全文，不要解释或标题。"
     )
@@ -98,6 +104,7 @@ def agent_editor_pass(
         "- redundancy：信息、对话是否重复。\n"
         "- show_tell：是否过多标签化情绪而非展示。\n"
         "- hook：章末是否有足够张力或悬念。\n"
+        "- web_fiction：若为网文爽文向，爽点/反转是否完整、是否与上章同质化；言情向感情推进是否由事件驱动而非空话。\n"
         "## 输出（仅 JSON）\n"
         '{"comments":"string","issues":[{"type":"pacing|redundancy|show_tell|hook|other","note":"string"}],'
         '"revised_text":"string 若需全文润色则填入，否则空字符串"}。\n'

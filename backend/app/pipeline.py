@@ -17,6 +17,7 @@ from .book_storage import (
     get_chapter_numbers,
     get_meta,
     get_plan,
+    get_toc,
     read_orchestration_state,
     update_plan,
     write_chapter,
@@ -172,6 +173,8 @@ PLAN_BATCH_SIZE = 20
 PLANNER_ORIGINALITY_CONTRACT = (
     "原创与节奏硬约束：全书与分章构思须独立原创，禁止对任何已有作品（出版读物、网文、影视等）进行情节复刻、名场面换皮、人设套壳或名句仿写；"
     "禁止依赖读者极易辨认的「经典桥段流水线」拼凑过关。叙事须有清晰起伏：阶段与章级均应有冲突、阻碍、信息差或意外转折，避免流水账与平铺直叙。"
+    " 若题材说明或题目体现网文爽文、言情、甜宠、逆袭、打脸等通俗叙事倾向：分章 beat 须写清冲突推进与章末悬念或留白；"
+    "言情向须在梗概与分章要点中体现感情线阶段（吸引、试探、阻碍、确认或拉扯反复），避免连续多章复用同一套打脸或误会桥段。"
 )
 
 
@@ -603,6 +606,10 @@ def _format_chapter_contract(
         lines.append(
             "【结构提示】开场尽快入戏；中段推进冲突或信息；结尾留情绪落点或悬念，避免「总之/后来」式收尾。"
         )
+    lines.append(
+        "【篇幅目标】本章完整正文约 **2000～4000 汉字**（含标点、对话与描写）。"
+        "以叙事完整为先，可贴近区间上下沿；禁止清单体、作者按语、复述合同或重复铺垫注水凑字。"
+    )
     return "\n".join(lines)
 
 
@@ -1778,6 +1785,218 @@ def run_pipeline_from_title(
     if supervisor_final is not None:
         out["supervisor_final"] = supervisor_final
     return out
+
+
+_REWRITE_TASK_NOTE = (
+    "【本章为重写】旧稿将被覆盖；须输出**整章完整正文**，满足下方篇幅与章末张力，"
+    "禁止只写补丁、脑内提纲或未完片段。"
+)
+
+
+def run_rewrite_chapter(
+    *,
+    root: Path,
+    book_id: str,
+    chapter_index: Optional[int],
+    theme_addon: str,
+    writer_system: str,
+    use_long_memory: bool,
+    memory_context_global: str,
+    kb_block: str,
+    writing_temp: float,
+    agent_profile: str = "fast",
+    run_reader_test: bool = False,
+    ideation_level: Optional[float] = None,
+    live_supervisor: bool = False,
+    progress_cb: ProgressCb = None,
+) -> dict[str, Any]:
+    """按既有 plan 要点（无则兜底）重新生成并覆盖某一章；chapter_index 为 None 时重写当前最后一章。"""
+    book_path = book_dir(root, book_id)
+    nums = get_chapter_numbers(root, book_id)
+    if not nums:
+        raise HTTPException(status_code=404, detail="本书暂无章节文件")
+    idx = int(chapter_index) if chapter_index is not None else int(max(nums))
+    if idx not in nums:
+        raise HTTPException(status_code=404, detail=f"第 {idx} 章不存在")
+
+    plan_data = get_plan(root, book_id)
+    premise = str(plan_data.get("premise") or "")
+    book_title = str(plan_data.get("book_title") or plan_data.get("title") or book_id)
+
+    length_scale = "medium"
+    macro_for_writing: Optional[dict[str, Any]] = None
+    meta_p = plan_data.get("meta")
+    if isinstance(meta_p, dict):
+        ls0 = str(meta_p.get("length_scale") or "").strip().lower()
+        if ls0 in ("short", "medium", "long"):
+            length_scale = ls0
+        mo = meta_p.get("macro_outline")
+        if isinstance(mo, dict):
+            macro_for_writing = mo
+
+    iw_raw = ideation_level
+    if iw_raw is None and isinstance(meta_p, dict) and meta_p.get("ideation_level") is not None:
+        try:
+            iw_raw = float(meta_p["ideation_level"])
+        except (TypeError, ValueError):
+            iw_raw = 0.5
+    if iw_raw is None:
+        iw_raw = 0.5
+    ideation_w = max(0.0, min(1.0, float(iw_raw)))
+
+    ch_row: Optional[dict[str, Any]] = None
+    chs_pl = plan_data.get("chapters")
+    if isinstance(chs_pl, list):
+        for c in chs_pl:
+            if isinstance(c, dict) and int(c.get("idx", 0)) == idx:
+                ch_row = _normalize_chapter_entry(c, idx)
+                break
+    if ch_row is None:
+        title_guess = ""
+        for row in get_toc(root, book_id):
+            if int(row["n"]) == idx:
+                title_guess = str(row.get("title") or "")
+                break
+        ch_row = {
+            "idx": idx,
+            "beat": (
+                f"（plan 未载第 {idx} 章要点）请据全书梗概与跨章提要重写本章；"
+                f"标题意象约「{title_guess or f'第 {idx} 章'}」；完整正文，章末须有情绪落点或悬念。"
+            ),
+        }
+        if title_guess:
+            ch_row["title"] = title_guess
+
+    ch_title = _fallback_chapter_title(ch_row, idx)
+    contract = _format_chapter_contract(
+        idx, ch_row, continuation=(idx > 1), length_scale=length_scale
+    )
+
+    system = writer_system.strip()
+    if theme_addon.strip():
+        system = f"{system}\n\n【题材约束】\n{theme_addon.strip()}"
+
+    voice_block = format_voice_from_book_meta(get_meta(root, book_id))
+    sem_q = f"{premise[:900]}\n{contract}"
+    mem_book = ""
+    if use_long_memory:
+        mem_book = build_memory_context(book_path, max_chars=4200, semantic_query=sem_q)
+    mem_parts: list[str] = []
+    if kb_block.strip():
+        mem_parts.append(kb_block.strip())
+    if use_long_memory:
+        if mem_book.strip():
+            mem_parts.append(mem_book.strip())
+        if memory_context_global.strip():
+            mem_parts.append("【全局记忆宫殿（跨书）】\n" + memory_context_global.strip())
+    if voice_block.strip():
+        mem_parts.append(voice_block.strip()[:7000])
+    mem_parts.append(ideation_instruction(ideation_w))
+    mem_parts.append(_REWRITE_TASK_NOTE)
+    if macro_for_writing:
+        mem_parts.append(_macro_phase_note_for_chapter(idx, macro_for_writing))
+    if length_scale == "short":
+        mem_parts.append(_short_story_reader_engagement_instruction())
+    if length_scale == "long":
+        cl = read_changelog_tail(book_path, max_chars=1200)
+        if cl.strip():
+            mem_parts.append("【设定变更 log（摘录·最近）】\n" + cl.strip())
+        mem_parts.append(long_novel_wiki_memory_instruction())
+    reg_block = build_character_registry_block(book_path, max_chars=3800)
+    mem_parts.append(CHARACTER_REGISTRY_INSTRUCTION + "\n" + reg_block)
+    story_tail = load_chapter_tail_for_prompt(book_path, max_chars=6800)
+    mem_parts.append(
+        f"【书名】{book_title}\n【全书梗概】\n{premise}\n"
+        f"【跨章剧情提要】\n{story_tail or '（尚无累积提要。）'}\n"
+        f"---\n{contract}\n\n"
+        "请写本章完整正文；只输出小说正文，不要标题以外的元说明。"
+    )
+    user_full = "\n\n".join(mem_parts)
+
+    if progress_cb:
+        progress_cb(
+            {
+                "event": "chapter_begin",
+                "index": idx,
+                "title": ch_title,
+                "rewrite": True,
+                "done": 0,
+                "total": 1,
+            }
+        )
+
+    try:
+        body, alog = run_chapter_with_agents(
+            system=system,
+            user_payload=user_full,
+            writing_temp=writing_temp,
+            premise=premise,
+            kb_block=kb_block,
+            agent_profile=agent_profile,
+            run_reader_test=run_reader_test,
+        )
+    except RuntimeError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        raise HTTPException(502, f"第 {idx} 章重写失败: {e}") from e
+
+    cleaned = sanitize_chapter_body(body)
+    if idx > 1:
+        prev_path = book_path / "chapters" / f"{idx - 1:02d}.md"
+        if prev_path.is_file():
+            try:
+                prev_plain = _chapter_body_plain_from_file(prev_path.read_text(encoding="utf-8"))
+                cleaned = strip_common_prefix_with_previous_opening(prev_plain, cleaned)
+            except OSError:
+                pass
+    cleaned = strip_leading_duplicate_chapter_heading(cleaned, ch_title)
+    content = _chapter_heading(ch_title, idx) + cleaned + "\n"
+    write_chapter(root, book_id, idx, content)
+    try:
+        append_agent_orchestration_log(
+            root,
+            book_id,
+            {"chapter": idx, "ts": time.time(), "rewrite": True, "log": compact_agent_log(alog)},
+        )
+    except OSError:
+        logger.debug("append_agent_orchestration_log failed", exc_info=True)
+
+    _live_supervisor_after_chapter(
+        live_supervisor=live_supervisor,
+        book_title=book_title,
+        chapter_index=idx,
+        chapter_title=ch_title,
+        beat=str(ch_row.get("beat") or ""),
+        premise=premise,
+        chapter_plain=cleaned,
+        alog=alog,
+        progress_cb=progress_cb,
+    )
+
+    orch = read_orchestration_state(root, book_id)
+    orch = orchestrator_bump_state(orch, step="chapter_rewrite", chapter=idx)
+    write_orchestration_state(root, book_id, orch)
+
+    if progress_cb:
+        progress_cb(
+            {
+                "event": "chapter_end",
+                "index": idx,
+                "title": ch_title,
+                "rewrite": True,
+                "done": 1,
+                "total": 1,
+            }
+        )
+
+    return {
+        "book_id": book_id,
+        "book_title": book_title,
+        "chapter_index": idx,
+        "chapter_title": ch_title,
+        "saved_file": str(book_path / "chapters" / f"{idx:02d}.md"),
+        "agent_log": alog,
+    }
 
 
 def run_continue_next_chapter(

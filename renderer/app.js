@@ -932,14 +932,16 @@ function initTabs() {
 }
 
 async function refreshSeriesList() {
-  const sel = document.getElementById('series-continue-select');
-  if (!sel) return;
-  const cur = sel.value;
-  sel.innerHTML = '';
+  const ids = ['series-continue-select', 'series-rewrite-select'];
+  const selects = ids.map((id) => document.getElementById(id)).filter(Boolean);
+  if (!selects.length) return;
+  const saved = selects.map((s) => s.value);
+
+  const builder = document.createElement('select');
   const ph = document.createElement('option');
   ph.value = '';
   ph.textContent = '—— 选择书本或旧书系 ——';
-  sel.appendChild(ph);
+  builder.appendChild(ph);
   try {
     let offset = 0;
     const lim = 400;
@@ -962,7 +964,7 @@ async function refreshSeriesList() {
         o.textContent = `${b.title || b.id} · ${b.chapter_count || 0} 章`;
         og.appendChild(o);
       }
-      sel.appendChild(og);
+      builder.appendChild(og);
     }
   } catch (e) {
     console.warn('books list', e);
@@ -978,14 +980,20 @@ async function refreshSeriesList() {
         o.textContent = `${s.prefix} · ${s.chapter_count} 章 · 末章 ${s.last_index}`;
         og.appendChild(o);
       }
-      sel.appendChild(og);
+      builder.appendChild(og);
     }
   } catch (e) {
     console.warn('series list', e);
   }
-  if (cur && Array.from(sel.options).some((op) => op.value === cur)) {
-    sel.value = cur;
-  }
+
+  const html = builder.innerHTML;
+  selects.forEach((sel, i) => {
+    sel.innerHTML = html;
+    const cur = saved[i];
+    if (cur && Array.from(sel.options).some((op) => op.value === cur)) {
+      sel.value = cur;
+    }
+  });
 }
 
 async function refreshHealth() {
@@ -1673,6 +1681,68 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (logEl) logEl.textContent = `失败：${e.message}`;
       if (gs) gs.textContent = '';
       void showAppAlert(e.message || String(e), '续写失败');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  document.getElementById('btn-rewrite-chapter')?.addEventListener('click', async () => {
+    const raw = document.getElementById('series-rewrite-select')?.value?.trim();
+    if (!raw || !raw.startsWith('book:')) {
+      void showAppAlert('请先点「刷新列表」，在「重写已有章节」里选择一本新书库书本（非旧 out 书系）。', '请选择书本');
+      return;
+    }
+    const logEl = document.getElementById('rewrite-log');
+    const gs = document.getElementById('gen-status');
+    const btn = document.getElementById('btn-rewrite-chapter');
+    if (btn) btn.disabled = true;
+    if (logEl) {
+      logEl.hidden = false;
+      logEl.textContent = '重写中：按 plan 要点覆盖该章正文…\n';
+    }
+    if (gs) gs.textContent = '重写章节中…';
+    try {
+      const rawIdx = document.getElementById('rewrite-chapter-index')?.value?.trim();
+      let chapter_index = null;
+      if (rawIdx) {
+        const n = parseInt(String(rawIdx), 10);
+        if (!Number.isFinite(n) || n < 1) {
+          void showAppAlert('章号须为正整数，或留空以重写末章。', '章号无效');
+          return;
+        }
+        chapter_index = n;
+      }
+      const payload = {
+        book_id: raw.slice(5),
+        chapter_index,
+        theme_id: document.getElementById('theme-id')?.value,
+        ideation_level: readIdeationLevel(),
+        use_long_memory: document.getElementById('cb-rewrite-memory')?.checked ?? true,
+        kb_names: selectedKbFiles(),
+        agent_profile: document.getElementById('rewrite-agent-profile')?.value || 'fast',
+        run_reader_test: document.getElementById('rewrite-reader-test')?.checked ?? false,
+        live_supervisor: document.getElementById('rewrite-live-supervisor')?.checked ?? false
+      };
+      const data = await fetchJson('/api/pipeline/rewrite-chapter', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      if (logEl) {
+        let text = `—— 重写完成 ——\n第 ${data.chapter_index} 章 ${data.chapter_title || ''}\n${data.saved_file || ''}\n书名：${data.book_title || ''}`;
+        const ls = data.agent_log;
+        if (ls && ls.steps && Array.isArray(ls.steps)) {
+          text += `\n编排：${ls.profile || ''}（${ls.steps.map((s) => s.agent).join(' → ')}）`;
+        }
+        logEl.textContent = text;
+      }
+      if (gs) gs.textContent = '重写已保存，可在书库中阅读。';
+      await refreshSeriesList();
+      await refreshMemBookOptions();
+      await refreshReaderBooks(true);
+    } catch (e) {
+      if (logEl) logEl.textContent = `失败：${e.message}`;
+      if (gs) gs.textContent = '';
+      void showAppAlert(e.message || String(e), '重写失败');
     } finally {
       if (btn) btn.disabled = false;
     }

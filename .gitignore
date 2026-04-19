@@ -13,3 +13,4 @@ __pycache__/
 .coverage
 htmlcov/
 backend/memory/*.sqlite3
+memory/*.sqlite3

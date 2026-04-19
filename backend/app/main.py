@@ -50,6 +50,7 @@ from .pipeline import (
     run_continue_next_chapter,
     run_continue_next_chapter_legacy_out,
     run_pipeline_from_title,
+    run_rewrite_chapter,
 )
 from .memory_store import (
     add_entry,
@@ -318,6 +319,31 @@ class PipelineContinueBody(BaseModel):
     )
 
 
+class PipelineRewriteChapterBody(BaseModel):
+    """覆盖重写某一章正文（默认最后一章）；不新增章号、不改 plan。"""
+
+    book_id: str = Field(..., min_length=4, max_length=32)
+    chapter_index: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=MAX_PIPELINE_CHAPTERS,
+        description="要重写的章号；省略则重写当前磁盘上最后一章",
+    )
+    theme_id: Optional[str] = Field(default="general")
+    use_long_memory: bool = Field(default=True)
+    kb_names: list[str] = Field(default_factory=list)
+    writing_temperature: float = Field(default=0.82, ge=0, le=2)
+    agent_profile: str = Field(default="fast")
+    run_reader_test: bool = Field(default=False)
+    ideation_level: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="不传则沿用书本 plan.meta.ideation_level",
+    )
+    live_supervisor: bool = Field(default=False)
+
+
 class TrashRestoreBody(BaseModel):
     folder: str = Field(..., min_length=4, max_length=64, description="回收站目录名，通常与书本 ID 相同")
 
@@ -373,7 +399,7 @@ def _compose_system(base_system: str, theme_id: Optional[str]) -> str:
 
 
 # 递增：Electron 启动时用于识别「本机 18765 上是否为当前应用的后端」，避免旧版/他进程占位导致 404。
-API_REVISION = 7
+API_REVISION = 9
 
 
 @app.get("/api/health")
@@ -899,6 +925,47 @@ def pipeline_continue(body: PipelineContinueBody):
     except RuntimeError as e:
         raise HTTPException(400, str(e)) from e
     return result
+
+
+@app.post("/api/pipeline/rewrite-chapter")
+def pipeline_rewrite_chapter(body: PipelineRewriteChapterBody):
+    """按 plan 要点（无则兜底 beat）重新生成并覆盖指定章。"""
+    writer_path = ROOT / "prompts" / "writer.md"
+    writer_system = _read_text(writer_path)
+    if not writer_system.strip():
+        raise HTTPException(400, "缺少或空的 prompts/writer.md")
+    th = theme_by_id(THEMES, body.theme_id or "general")
+    theme_addon = str((th or {}).get("system_addon") or "")
+    kb_block = _kb_context_only(body.kb_names)
+    mem_global = ""
+    if body.use_long_memory:
+        mem_global = build_memory_context(ROOT, max_chars=2800)
+    ap = (body.agent_profile or "fast").strip().lower()
+    if ap not in ("fast", "full"):
+        ap = "fast"
+    bid = (body.book_id or "").strip()
+    if not bid:
+        raise HTTPException(400, "请提供 book_id")
+    try:
+        return run_rewrite_chapter(
+            root=ROOT,
+            book_id=bid,
+            chapter_index=body.chapter_index,
+            theme_addon=theme_addon,
+            writer_system=writer_system,
+            use_long_memory=body.use_long_memory,
+            memory_context_global=mem_global,
+            kb_block=kb_block,
+            writing_temp=body.writing_temperature,
+            agent_profile=ap,
+            run_reader_test=bool(body.run_reader_test),
+            ideation_level=body.ideation_level,
+            live_supervisor=bool(body.live_supervisor),
+        )
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @app.get("/api/memory/entries")

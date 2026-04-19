@@ -24,7 +24,7 @@ from typing import Any, Optional
 
 from .core.logging import get_logger, LogContext
 from .jsonutil import extract_json_object
-from .llm import chat_completion
+from .llm import chat_completion, writer_completion_max_tokens
 
 logger = get_logger(__name__)
 
@@ -227,7 +227,12 @@ def write_scene(
         user_prompt += "\n注意自然承接上一场景。"
 
     try:
-        text = chat_completion(system=system_prompt, user=user_prompt, temperature=temperature)
+        text = chat_completion(
+            system=system_prompt,
+            user=user_prompt,
+            temperature=temperature,
+            max_tokens=writer_completion_max_tokens(),
+        )
         return text.strip()
     except Exception as e:
         logger.error(f"Failed to write scene: {e}")
@@ -381,7 +386,12 @@ def generate_chapter_with_scenes(
         # Fall back to direct chapter generation
         logger.info("Using direct chapter generation")
         user_prompt = f"{context}\n\n请写出本章完整正文。"
-        text = chat_completion(system=system_prompt, user=user_prompt, temperature=temperature)
+        text = chat_completion(
+            system=system_prompt,
+            user=user_prompt,
+            temperature=temperature,
+            max_tokens=writer_completion_max_tokens(),
+        )
         metadata["method"] = "direct"
         metadata["length"] = len(text)
         return text.strip(), metadata
