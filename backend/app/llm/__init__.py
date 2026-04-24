@@ -39,7 +39,7 @@ from .providers import (
 logger = get_logger(__name__)
 
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
-DEFAULT_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+DEFAULT_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
 _client: OpenAI | None = None
 _client_config_key: str | None = None

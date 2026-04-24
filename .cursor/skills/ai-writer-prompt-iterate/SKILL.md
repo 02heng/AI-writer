@@ -45,5 +45,5 @@ description: >-
 
 ## 网文爽文 / 言情（已融入仓库）
 
-- **Writer**：`writer.md` 含「网文爽文与言情（条件激活）」；策划侧见 `pipeline.py` 中 `PLANNER_ORIGINALITY_CONTRACT` 对通俗叙事与感情线阶段的约束。
+- **Writer**：`writer.md` 含「网文爽文与言情（条件激活）」「平台正文用语规避」「长篇开头入戏期（条件激活）」；策划侧见 `pipeline.py` 中 `PLANNER_ORIGINALITY_CONTRACT`（禁用「经典桥段流水线」类字面于策划提示，改用「桥段硬套」等）。
 - **编排**：`agents.py` 中 Character 润色、Editor 评估维度；`supervisor.py` 逐章快审任务含爽文/言情检视。改上述任一处时请同步 checklist 与 manifest 版本。

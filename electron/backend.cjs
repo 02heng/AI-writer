@@ -108,7 +108,7 @@ function startBackend({ userDataPath, projectRoot }) {
 
     const settings = readSettings(userDataPath);
     const apiKey = (settings.deepseekApiKey || process.env.DEEPSEEK_API_KEY || '').trim();
-    const model = (settings.deepseekModel || 'deepseek-chat').trim();
+    const model = (settings.deepseekModel || 'deepseek-v4-flash').trim();
     const booksRoot = (settings.booksRoot || '').trim();
 
     const backendDir = path.join(projectRoot, 'backend');

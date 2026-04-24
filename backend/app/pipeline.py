@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -26,6 +27,7 @@ from .book_storage import (
 from .core.logging import get_logger, LogContext
 from .jsonutil import extract_json_object
 from .text_sanitize import (
+    relax_runon_cjk_prose_to_paragraphs,
     strip_aiwriter_prose_noise,
     strip_common_prefix_with_previous_opening,
     strip_markdown_double_asterisk_bold,
@@ -172,7 +174,7 @@ PLAN_BATCH_SIZE = 20
 # 策划用：原创、反套作与剧情起伏（写入各 planner 的 system 提示，可被 main 大纲接口复用）
 PLANNER_ORIGINALITY_CONTRACT = (
     "原创与节奏硬约束：全书与分章构思须独立原创，禁止对任何已有作品（出版读物、网文、影视等）进行情节复刻、名场面换皮、人设套壳或名句仿写；"
-    "禁止依赖读者极易辨认的「经典桥段流水线」拼凑过关。叙事须有清晰起伏：阶段与章级均应有冲突、阻碍、信息差或意外转折，避免流水账与平铺直叙。"
+    "禁止依赖读者极易辨认的「经典桥段硬套、桥段堆砌」拼凑过关；策划与分章 beat 的正文措辞避免使用易被连载平台误判的字面词（见 Writer「平台正文用语规避」）。叙事须有清晰起伏：阶段与章级均应有冲突、阻碍、信息差或意外转折，避免流水账与平铺直叙。"
     " 若题材说明或题目体现网文爽文、言情、甜宠、逆袭、打脸等通俗叙事倾向：分章 beat 须写清冲突推进与章末悬念或留白；"
     "言情向须在梗概与分章要点中体现感情线阶段（吸引、试探、阻碍、确认或拉扯反复），避免连续多章复用同一套打脸或误会桥段。"
 )
@@ -235,6 +237,7 @@ def _plan_macro_scale(
     protagonist_gender: str,
     temperature: float,
     ideation_level: float = 0.5,
+    theme_id: Optional[str] = None,
 ) -> tuple[str, str, dict[str, Any]]:
     """两阶策划·宏观：全书总尺度 + 阶段路线图（不生成逐章 beat）。"""
     sys_p = (
@@ -251,7 +254,7 @@ def _plan_macro_scale(
         f"题目：{title.strip()}\n"
         f"全书预定总章数：{planned_total}（必须按此尺度设计阶段跨度）。\n"
         f"本轮将实际生成正文：第 1–{chapters_this_run} 章。\n"
-        f"{_scale_instruction(length_scale)}\n{_protagonist_instruction(protagonist_gender)}\n"
+        f"{_scale_instruction(length_scale, theme_id)}\n{_protagonist_instruction(protagonist_gender)}\n"
         f"{ideation_instruction(ideation_level)}\n"
     )
     if theme_hint:
@@ -330,6 +333,7 @@ def _batched_chapter_plan_slices(
     temperature: float,
     macro_block: str = "",
     ideation_level: float = 0.5,
+    theme_id: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """从第 1 章起分批生成共 n 章的分章要点。"""
     n = max(3, min(int(n), MAX_PIPELINE_CHAPTERS))
@@ -358,6 +362,7 @@ def _batched_chapter_plan_slices(
             prev_tail_hint=prev_tail,
             macro_block=macro_block,
             ideation_level=ideation_level,
+            theme_id=theme_id,
         )
         all_ch.extend(batch)
         start = end + 1
@@ -401,7 +406,7 @@ def strip_leading_duplicate_chapter_heading(body: str, ch_title: str) -> str:
 
 
 def sanitize_chapter_body(body: str) -> str:
-    """Strip HTML comments, decorative lines, Markdown **bold**, line-leading > / list marks, and `,-` glitches."""
+    """Strip HTML comments, decorative lines, Markdown **bold**, line-leading > / list / # marks, and `,-` glitches."""
     t = body.strip()
     t = re.sub(r"<!--[\s\S]*?-->", "", t)
     lines_out: list[str] = []
@@ -417,7 +422,8 @@ def sanitize_chapter_body(body: str) -> str:
         lines_out.append(line)
     out = "\n".join(lines_out).strip()
     out = strip_markdown_double_asterisk_bold(out)
-    return strip_aiwriter_prose_noise(out)
+    out = strip_aiwriter_prose_noise(out)
+    return relax_runon_cjk_prose_to_paragraphs(out)
 
 
 def _chapter_body_plain_from_file(raw_md: str) -> str:
@@ -458,10 +464,56 @@ def _short_story_reader_engagement_instruction() -> str:
         "（2）爽点类型须轮换：同一章勿用同一种「爽」反复灌水；采用「小爽→略压或顿挫→更大爽」的微型波浪，整体节奏比中长篇更紧。"
         "（3）信息前置：读者追读的悬念或利害关系须在标题意象或首段可被感知，勿把核心钩子推迟到大量铺陈之后。"
         "（4）首次强情绪或信息反馈尽量前移，勿让读者划行过久才得到 payoff；可先给阶段性满足，再以伏笔拉长后文期待，勿倒置。"
+        "（5）**第1章与第2章（全书短篇）**：两章**各自**须在开篇**一至三段或约二百汉字内**让读者明确感到「爽」或「虐」的强体感（与梗概主调一致，可一章偏爽一章偏虐或同调递进，但不得两章开头都温吞）；"
+        "爽——利害翻盘、打脸、逆袭、尊严回击、希望陡升等可感回报；虐——委屈、失去、关系撕裂、抉择刺痛、绝望一沉等情绪直给，须**瞬间抓眼**，禁止慢热纯铺垫或散文感喟单独撑起开篇。"
     )
 
 
-def _scale_instruction(length_scale: str) -> str:
+# 与 `data/themes.json` 中言情向 id 对齐；短篇 + 其中任一时注入「网文体言情专规」。
+SHORT_STORY_ROMANCE_THEME_IDS = frozenset({"romance", "ancient_romance"})
+
+
+def theme_id_is_romance(theme_id: Optional[str]) -> bool:
+    return (theme_id or "").strip().lower() in SHORT_STORY_ROMANCE_THEME_IDS
+
+
+def _short_story_romance_web_instruction() -> str:
+    """短篇 + 言情题材：网文体结构与口味分流（策划合同与 Writer 用户消息共用）。"""
+    return (
+        "【短篇·网文体·言情专规】（须与【短篇读者节奏】一并遵守）"
+        "篇幅定位：全书宜约八千至一万六千字，分三至六章；段落宜短（多以二至四行一句一段），适配手机竖屏。"
+        "结构：开端尽快写出「关系命题 + 障碍」；中段用具体场景递进感情（试探、拉扯、确认），避免空话甜宠或同一种误会反复灌水；结尾须呈现关系或可感情绪落点（动作或关键对白），少用作者总结。"
+        "章末：每章末须有钩子（新信息、反常、半句话打断）或足够强的情绪沉降。"
+        "口味分流（梗概或用户说明若已指定虐/甜/爽其一，则全书主调须一致）："
+        "虐——内外双层阻力（事件 + 自尊/亏欠/为保护而隐瞒），惨烈须有代价；和好须有成长，禁止无代价一句话和好。"
+        "甜——障碍小而具体、可翻篇；高糖靠互动细节与潜台词，少用套路表白堆砌。"
+        "爽——憋屈有度、翻盘有声；打脸/追妻须有场面与因果，反派忌全员降智。"
+        "若并行悬疑：主线仅保留一条主谜团，真相须对前文公平（线索可回看拼合）。"
+    )
+
+
+def _resolved_theme_id_for_book(plan_data: dict[str, Any], *, request_theme_id: Optional[str] = None) -> str:
+    """书本 plan.meta.theme_id 优先于本次请求题材（便于续写与重写沿用建书时的题材）。"""
+    meta = plan_data.get("meta")
+    if isinstance(meta, dict):
+        t = str(meta.get("theme_id") or "").strip().lower()
+        if t:
+            return t
+    req = str(request_theme_id or "").strip().lower()
+    return req if req else "general"
+
+
+def _maybe_append_short_story_romance_writer(
+    parts: list[str],
+    *,
+    length_scale: str,
+    theme_id: Optional[str],
+) -> None:
+    if length_scale == "short" and theme_id_is_romance(theme_id):
+        parts.append(_short_story_romance_web_instruction())
+
+
+def _scale_instruction(length_scale: str, theme_id: Optional[str] = None) -> str:
     m = {
         "short": "篇幅为短篇：结构紧凑，单线或极少支线，冲突推进快，适合约三万至八万汉字量级的叙事节奏，避免冗长支线。",
         "medium": "篇幅为中篇：可有适度支线与铺陈，节奏介于短篇与长篇之间，注意主线清晰。",
@@ -469,8 +521,57 @@ def _scale_instruction(length_scale: str) -> str:
     }
     base = m.get(length_scale, m["medium"])
     if length_scale == "short":
-        return base + "\n" + _short_story_reader_engagement_instruction()
+        base = base + "\n" + _short_story_reader_engagement_instruction()
+        if theme_id_is_romance(theme_id):
+            base = base + "\n" + _short_story_romance_web_instruction()
+        return base
     return base
+
+
+# 用户未自定主角姓名时，策划/梗概中自拟主角姓仅允许从此表选取（用户已写明全名或姓时不受限）。
+PROTAGONIST_SURNAME_WHITELIST = (
+    "蓝",
+    "云",
+    "窦",
+    "颜",
+    "左",
+    "花",
+    "艾",
+    "冷",
+    "荆",
+    "凌",
+    "喻",
+    "夜",
+    "席",
+    "骆",
+    "路",
+    "游",
+    "祁",
+    "盛",
+    "柏",
+    "易",
+    "容",
+    "巫",
+    "池",
+    "厉",
+    "南",
+    "裴",
+    "闻",
+    "阎",
+    "脊",
+    "商",
+    "东方",
+    "宇文",
+)
+
+
+def _protagonist_surname_whitelist_instruction() -> str:
+    joined = "、".join(PROTAGONIST_SURNAME_WHITELIST)
+    return (
+        "【主角姓氏】若用户已在题目、说明或对话中明确给出主角姓名（含姓），须完全沿用，不得擅自改姓。"
+        f"若尚未给出姓名而需自拟主角：**姓**只能从以下选取其一（单字或复姓）：{joined}。"
+        "不得使用上述以外的姓；勿用林、叶、萧等网文高频姓。"
+    )
 
 
 def _protagonist_instruction(gender: str) -> str:
@@ -479,7 +580,8 @@ def _protagonist_instruction(gender: str) -> str:
         "female": "主角为女性；全文保持视角稳定（若第三人称则以该女性为主要视点人物），不得无交代切换主角。",
         "any": "主角性别与视角由故事自然呈现，但须前后一致，不得中途无解释改变主角核心设定。",
     }
-    return m.get(gender, m["any"])
+    base = m.get(gender, m["any"])
+    return base + "\n" + _protagonist_surname_whitelist_instruction()
 
 
 def ideation_instruction(level: float) -> str:
@@ -562,13 +664,21 @@ def _format_chapter_contract(
     ch: dict[str, Any],
     *,
     continuation: bool = False,
+    is_rewrite: bool = False,
     length_scale: Optional[str] = None,
+    theme_id: Optional[str] = None,
 ) -> str:
-    tail = (
-        "（续写：须自然承接上一章语气和事实，勿重述已交代信息；若上章末为险情或未结动作，须先写清直接后果再转入新场景，禁止无过渡跳切。）"
-        if continuation
-        else ""
-    )
+    if continuation and is_rewrite:
+        tail = (
+            "（重写：须与上一章已发生事实、时间线、人物状态一致并自然衔接，勿为「翻新」而先铺环境、天光、陈设或**大段色光/物色**；"
+            "若上章末为险情或未结动作，章内须先写清直接后果再推进；禁止无过渡跳切、与上章已发生事实矛盾。）"
+        )
+    elif continuation:
+        tail = (
+            "（续写：须自然承接上一章语气和事实，勿重述已交代信息；若上章末为险情或未结动作，须先写清直接后果再转入新场景，禁止无过渡跳切。）"
+        )
+    else:
+        tail = ""
     ch_title = _fallback_chapter_title(ch, idx)
     lines: list[str] = [f"【本章写作合同】第 {idx} 章{tail}"]
     lines.append(
@@ -598,10 +708,20 @@ def _format_chapter_contract(
         lines.append(f"【为后文留白 / 埋钩】\n{sfl}")
     ls = (length_scale or "").strip().lower()
     if ls == "short":
-        lines.append(
+        short_struct = (
             "【结构提示·短篇】除须满足上文【短篇读者节奏】外：开场即陷入可感冲突或悬念；"
             "中段维持微型波浪；结尾仍须情绪落点或悬念，避免「总之/后来」式收尾。"
         )
+        if idx in (1, 2):
+            short_struct += (
+                f"**本章为第 {idx} 章**：须落实节奏（5）——开篇极短篇幅内给到明确的爽感或虐感，瞬间吸引读者，勿寡淡起笔。"
+            )
+        lines.append(short_struct)
+        if theme_id_is_romance(theme_id):
+            lines.append(
+                "【结构提示·短篇言情】全书按网文体短篇言情执行：段落宜短、章末有钩子或情绪落点；"
+                "若梗概已写明虐/甜/爽主调须贯穿，勿改调；详见用户提示中的【短篇·网文体·言情专规】。"
+            )
     else:
         lines.append(
             "【结构提示】开场尽快入戏；中段推进冲突或信息；结尾留情绪落点或悬念，避免「总之/后来」式收尾。"
@@ -617,10 +737,24 @@ def _continuation_prev_chapter_bridge_instruction(last_chapter_index: int) -> st
     """续写时注入：避免上章末险情/断钩与本章策划场景无过渡跳切。"""
     return (
         "【续写衔接·强制】\n"
-        f"上文「上一章正文」为第 {last_chapter_index} 章。若该章以险情、对峙、负伤未稳、对话或动作未收束、生死未卜等收笔，"
-        "本章开篇必须在**连续时间线**内先写清直接后果（脱险、救治、晕厥转醒、一方退走、对峙暂歇等均可），篇幅约占全章一成至三成为宜，视烈度自定。\n"
+        f"上文「上一章正文」为第 {last_chapter_index} 章。续写时**不得**以天气、天光、街景、陈设或**大段色光/物色铺陈**开篇；**开篇须直接落在**上章收束点之后的情节、对话或后果上。"
+        "若该章以险情、对峙、负伤未稳、对话或动作未收束、生死未卜等收笔，"
+        "本章必须在**连续时间线**内先写清直接后果（脱险、救治、晕厥转醒、一方退走、对峙暂歇等均可），篇幅约占全章一成至三成为宜，视烈度自定。\n"
         "若本章【节拍/要点】要求的新场景、新时段与上章末镜不同，须有**可见的叙事过渡**（时间标注、空间转移的动机与过程），且不得与上章已发生事实矛盾；"
         "禁止开篇即另起炉灶、风和日丽，仿佛上章末段从未发生。\n"
+    )
+
+
+def _rewrite_chapter_bridge_instruction(
+    previous_chapter_index: int, rewrite_chapter_index: int
+) -> str:
+    """重写时注入：与续写同一套「禁开篇先写景/色、须承接上章收束点」的约束；旧稿可弃但衔接事实不可断。"""
+    return (
+        "【重写·开篇与衔接·强制】\n"
+        f"你正在**重写第 {rewrite_chapter_index} 章**（旧稿将丢弃、由新正文完整替换），但仍须与第 {previous_chapter_index} 章在事实、时间线、人物状态上**可衔接**。"
+        f"**不得**为「换风格」而先写天气、天光、街景、陈设或**大段色光/物色铺陈**起笔；下方「上一章正文」为第 {previous_chapter_index} 章，新稿开篇须**直接落在**上章收束点之后能自然接续的情节、对话或后果上。"
+        f"若上章以险情、对峙、未结动作、生死未卜等收笔，本章内须在**连续时间线**上先给读者交代直接后果，再依合同推进；"
+        f"若【节拍/要点】要求新场景/新时段，须有可见过渡且不与上章事实矛盾；禁止开篇另起炉灶、风和日丽，仿佛上章末段未发生。\n"
     )
 
 
@@ -711,7 +845,9 @@ def plan_continuation_arc(
         "2. space_for_later：本批内为**更后章节**埋的悬念或留白（非本章内细节），可写「无」。\n"
         "3. hook_end：章末情绪或信息悬念，一句话。\n"
         "4. 章序 idx 必须从给定起始连续递增，禁止跳号或重复。\n"
-        "## 输出（仅 JSON）\n"
+        "5. 输出**严格合法 JSON**（机器可 `json.loads`）：键/元素之间用英文逗号、禁止尾逗号；**每个字符串值须单行**，"
+        "值内禁止真实换行与未转义英文双引号；长 beat 可一句写满或用中文分号连接短句，勿在引号内回车。\n"
+        "## 输出（仅 JSON，勿 Markdown 围栏）\n"
         '{"arc_notes":"本批弧光与主线推进一两句",'
         '"chapters":['
         '{"idx":int,"title":"6~14字章名","beat":"180~280字要点","space_for_later":"string","hook_end":"string"}'
@@ -730,11 +866,33 @@ def plan_continuation_arc(
         f"{hook_section}"
         f"请规划第 {start_idx} 章到第 {end_idx} 章，共 {arc_length} 章；输出 chapters 数组。"
     )
-    raw = chat_completion(system=sys_p, user=user_p, temperature=temperature)
-    try:
-        data = extract_json_object(raw)
-    except (ValueError, json.JSONDecodeError, TypeError) as e:
-        raise HTTPException(502, f"续写弧规划 JSON 解析失败：{e}") from e
+    data: dict[str, Any] | None = None
+    last_err: Exception | None = None
+    for attempt in range(3):
+        strict = ""
+        if attempt:
+            strict = (
+                " 上次输出不是合法 JSON。只输出**一个** JSON 对象，勿 Markdown 代码围栏，勿解释；"
+                "键/数组项之间用英文逗号、禁止尾逗号；**每个字符串值为单行**（无真实换行），长 beat 用分号；"
+                "字符串内英文双引号须写成 \\\"。"
+            )
+        u = user_p if attempt == 0 else user_p + "\n【重试】整段须是单行安全的合法 JSON，不要换行在引号里。"
+        try:
+            raw = chat_completion(
+                system=sys_p + strict,
+                user=u,
+                temperature=max(0.25, float(temperature) - 0.1 * attempt),
+            )
+            data = extract_json_object(raw)
+            if isinstance(data, dict):
+                break
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            last_err = e
+            continue
+        except LLMTransportError:
+            raise
+    if not isinstance(data, dict):
+        raise HTTPException(502, f"续写弧规划 JSON 解析失败：{last_err}") from last_err
 
     raw_chapters = data.get("chapters")
     if not isinstance(raw_chapters, list) or len(raw_chapters) != arc_length:
@@ -809,6 +967,7 @@ def _plan_from_title_single(
     protagonist_gender: str,
     temperature: float,
     ideation_level: float = 0.5,
+    theme_id: Optional[str] = None,
 ) -> dict[str, Any]:
     n = max(3, min(int(chapter_count), PLAN_SINGLE_SHOT_MAX))
     compact = n > 10
@@ -846,7 +1005,7 @@ def _plan_from_title_single(
         )
     user_p = f"题目：{title.strip()}\n"
     user_p += f"总章数（必须严格遵守）：恰好 {n} 章。\n"
-    user_p += _scale_instruction(length_scale) + "\n"
+    user_p += _scale_instruction(length_scale, theme_id) + "\n"
     user_p += _protagonist_instruction(protagonist_gender) + "\n"
     user_p += ideation_instruction(ideation_level) + "\n"
     if theme_hint:
@@ -891,6 +1050,7 @@ def _plan_book_meta(
     protagonist_gender: str,
     temperature: float,
     ideation_level: float = 0.5,
+    theme_id: Optional[str] = None,
 ) -> tuple[str, str]:
     sys_p = (
         "你是中文小说总策划。只输出一个 JSON 对象，禁止 Markdown。"
@@ -901,7 +1061,7 @@ def _plan_book_meta(
     user_p = (
         f"题目：{title.strip()}\n"
         f"全书共 {total_chapters} 章（分章要点将分批生成，此处只输出书名定稿与全书梗概）。\n"
-        f"{_scale_instruction(length_scale)}\n"
+        f"{_scale_instruction(length_scale, theme_id)}\n"
         f"{_protagonist_instruction(protagonist_gender)}\n"
         f"{ideation_instruction(ideation_level)}\n"
     )
@@ -941,6 +1101,7 @@ def _plan_chapters_slice(
     prev_tail_hint: str,
     macro_block: str = "",
     ideation_level: float = 0.5,
+    theme_id: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     k = end_idx - start_idx + 1
     sys_p = (
@@ -952,7 +1113,7 @@ def _plan_chapters_slice(
     )
     user_p = (
         f"原始题目：{title.strip()}\n书名：{book_title}\n【全书梗概】\n{premise}\n"
-        f"{_scale_instruction(length_scale)}\n{_protagonist_instruction(protagonist_gender)}\n"
+        f"{_scale_instruction(length_scale, theme_id)}\n{_protagonist_instruction(protagonist_gender)}\n"
         f"{ideation_instruction(ideation_level)}\n"
     )
     if theme_hint:
@@ -1009,6 +1170,7 @@ def _plan_from_title_batched(
     protagonist_gender: str,
     temperature: float,
     ideation_level: float = 0.5,
+    theme_id: Optional[str] = None,
 ) -> dict[str, Any]:
     n = max(3, min(int(chapter_count), MAX_PIPELINE_CHAPTERS))
     book_title, premise = _plan_book_meta(
@@ -1019,6 +1181,7 @@ def _plan_from_title_batched(
         protagonist_gender=protagonist_gender,
         temperature=temperature,
         ideation_level=ideation_level,
+        theme_id=theme_id,
     )
     all_ch = _batched_chapter_plan_slices(
         title=title,
@@ -1031,6 +1194,7 @@ def _plan_from_title_batched(
         temperature=temperature,
         macro_block="",
         ideation_level=ideation_level,
+        theme_id=theme_id,
     )
     return {"book_title": book_title, "premise": premise, "chapters": all_ch}
 
@@ -1046,6 +1210,7 @@ def _plan_from_title(
     planned_total_chapters: Optional[int] = None,
     progress_cb: ProgressCb = None,
     ideation_level: float = 0.5,
+    theme_id: Optional[str] = None,
 ) -> dict[str, Any]:
     n_run = max(3, min(int(chapter_count), MAX_PIPELINE_CHAPTERS))
     if planned_total_chapters is not None:
@@ -1073,6 +1238,7 @@ def _plan_from_title(
             protagonist_gender=protagonist_gender,
             temperature=temperature,
             ideation_level=ideation_level,
+            theme_id=theme_id,
         )
         mb = _format_macro_block(macro, chapters_this_run=n_run)
         if progress_cb:
@@ -1094,6 +1260,7 @@ def _plan_from_title(
             temperature=temperature,
             macro_block=mb,
             ideation_level=ideation_level,
+            theme_id=theme_id,
         )
         return {
             "book_title": book_title,
@@ -1111,6 +1278,7 @@ def _plan_from_title(
             protagonist_gender=protagonist_gender,
             temperature=temperature,
             ideation_level=ideation_level,
+            theme_id=theme_id,
         )
     return _plan_from_title_batched(
         title=title,
@@ -1120,6 +1288,7 @@ def _plan_from_title(
         protagonist_gender=protagonist_gender,
         temperature=temperature,
         ideation_level=ideation_level,
+        theme_id=theme_id,
     )
 
 
@@ -1241,6 +1410,7 @@ def _seed_series_canon_memory(
     macro_outline: Optional[dict[str, Any]] = None,
     ideation_level: float = 0.5,
     extra_voice_context: str = "",
+    theme_id: Optional[str] = None,
 ) -> None:
     """开笔前：世界观/人物/伏笔/时间线写入本书记忆宫殿与条目（与长期记忆约定一致）。"""
     compact = _compact_outline_for_canon(chapters, n_target)
@@ -1264,7 +1434,7 @@ def _seed_series_canon_memory(
             pass
     user_p = (
         f"书名：{book_title}\n{plan_note}\n【全书梗概】\n{premise}\n"
-        f"{_scale_instruction(length_scale)}\n{_protagonist_instruction(protagonist_gender)}\n"
+        f"{_scale_instruction(length_scale, theme_id)}\n{_protagonist_instruction(protagonist_gender)}\n"
         f"{ideation_instruction(ideation_level)}\n"
     )
     if theme_hint:
@@ -1346,6 +1516,38 @@ def _seed_series_canon_memory(
         logger.warning("series canon memory write failed: %s", e)
 
 
+def _reader_pipeline_extras(
+    book_path: Path,
+    chapter_index: int,
+    length_scale: str,
+    character_registry_block: str,
+) -> tuple[str, int, str]:
+    """(上一章结尾摘录, 目标最小正文字数供读者粗判, 人名/注册表摘录)。"""
+    raw = (os.environ.get("AIWRITER_READER_TARGET_MIN_BODY_CHARS") or "").strip()
+    if raw.isdigit():
+        tmin = max(0, int(raw))
+    else:
+        ls = (length_scale or "medium").strip().lower()
+        if ls == "short":
+            tmin = 600
+        elif ls == "long":
+            tmin = 1800
+        else:
+            tmin = 1400
+    prev = ""
+    if chapter_index > 1:
+        pp = book_path / "chapters" / f"{chapter_index - 1:02d}.md"
+        if pp.is_file():
+            try:
+                pl = _chapter_body_plain_from_file(pp.read_text(encoding="utf-8")).strip()
+                if pl:
+                    prev = pl[-2000:] if len(pl) > 2000 else pl
+            except OSError:
+                pass
+    names = (character_registry_block or "")[:2000]
+    return prev, tmin, names
+
+
 def run_pipeline_from_title(
     *,
     root: Path,
@@ -1363,6 +1565,7 @@ def run_pipeline_from_title(
     agent_profile: str = "fast",
     sync_book_memory: bool = True,
     run_reader_test: bool = False,
+    run_reader_driven_revision: bool = True,
     use_scene_generation: bool = False,
     progress_cb: ProgressCb = None,
     planned_total_chapters: Optional[int] = None,
@@ -1372,6 +1575,7 @@ def run_pipeline_from_title(
     final_supervisor: bool = False,
     memory_episodic_keep_last: Optional[int] = None,
     foreshadowing_sync_after_chapter: bool = False,
+    theme_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """策划 → 逐章写作 → 写入 books/{book_id}/。
     
@@ -1379,6 +1583,7 @@ def run_pipeline_from_title(
         use_scene_generation: If True, use scene-level generation for better
             long-text quality. Each chapter is split into scenes before writing.
     """
+    theme_tid = str(theme_id or "general").strip().lower()
     theme_hint = (theme_addon or "").strip()
     note_s = (user_book_note or "").strip()
     theme_for_plan = theme_hint
@@ -1409,6 +1614,7 @@ def run_pipeline_from_title(
             planned_total_chapters=planned_opt,
             progress_cb=progress_cb,
             ideation_level=ideation_w,
+            theme_id=theme_tid,
         )
     except (json.JSONDecodeError, ValueError, TypeError) as e:
         raise HTTPException(status_code=502, detail=f"策划阶段失败（JSON）：{e}") from e
@@ -1477,6 +1683,7 @@ def run_pipeline_from_title(
         "planned_total_chapters": planned_stored,
         "ideation_level": ideation_w,
         "virtual_author": author_meta,
+        "theme_id": theme_tid,
     }
     if note_s:
         meta_plan["user_book_note"] = note_s
@@ -1529,6 +1736,7 @@ def run_pipeline_from_title(
             macro_outline=macro_for_writing,
             ideation_level=ideation_w,
             extra_voice_context=canon_voice,
+            theme_id=theme_tid,
         )
         _seed_author_project_memory_entries(
             book_path,
@@ -1581,7 +1789,9 @@ def run_pipeline_from_title(
                 }
             )
         ch_start = time.perf_counter()
-        contract = _format_chapter_contract(idx, ch, continuation=False, length_scale=length_scale)
+        contract = _format_chapter_contract(
+            idx, ch, continuation=False, length_scale=length_scale, theme_id=theme_tid
+        )
         sem_q = f"{premise[:900]}\n{contract}"
         mem_book = ""
         if use_long_memory:
@@ -1601,6 +1811,7 @@ def run_pipeline_from_title(
             mem_parts.append(_macro_phase_note_for_chapter(idx, macro_for_writing))
         if length_scale == "short":
             mem_parts.append(_short_story_reader_engagement_instruction())
+            _maybe_append_short_story_romance_writer(mem_parts, length_scale=length_scale, theme_id=theme_tid)
         if length_scale == "long":
             cl = read_changelog_tail(book_path, max_chars=1200)
             if cl.strip():
@@ -1608,6 +1819,9 @@ def run_pipeline_from_title(
             mem_parts.append(long_novel_wiki_memory_instruction())
         reg_block = build_character_registry_block(book_path, max_chars=3800)
         mem_parts.append(CHARACTER_REGISTRY_INSTRUCTION + "\n" + reg_block)
+        r_prev, r_tmin, r_names = _reader_pipeline_extras(
+            book_path, idx, length_scale, reg_block
+        )
         story_tail = load_chapter_tail_for_prompt(book_path, max_chars=6800)
         mem_parts.append(
             f"【书名】{book_title}\n【全书梗概】\n{premise}\n"
@@ -1625,6 +1839,10 @@ def run_pipeline_from_title(
                 kb_block=kb_block,
                 agent_profile=agent_profile,
                 run_reader_test=run_reader_test,
+                run_reader_driven_revision=run_reader_driven_revision,
+                reader_prev_chapter_tail=r_prev,
+                reader_known_names_hint=r_names,
+                reader_target_min_body_chars=r_tmin,
             )
         except RuntimeError as e:
             raise HTTPException(400, str(e)) from e
@@ -1775,6 +1993,7 @@ def run_pipeline_from_title(
             "ideation_level": ideation_w,
             "virtual_author": author_meta,
             "user_book_note": note_s,
+            "theme_id": theme_tid,
         },
         "virtual_author": author_meta,
         "user_book_note": note_s,
@@ -1793,6 +2012,17 @@ _REWRITE_TASK_NOTE = (
 )
 
 
+def _rewrite_author_note_instruction(note: str) -> str:
+    s = (note or "").strip()
+    if not s:
+        return ""
+    return (
+        "【本章重写 · 作者补充意图】\n"
+        f"{s[:6000]}\n"
+        "须在遵守全书梗概、本章写作合同与 KB/记忆宫殿既定事实的前提下落实；若与合同或设定冲突，以梗概与合同为准，并在可自洽范围内向上述意图靠拢。\n"
+    )
+
+
 def run_rewrite_chapter(
     *,
     root: Path,
@@ -1806,9 +2036,12 @@ def run_rewrite_chapter(
     writing_temp: float,
     agent_profile: str = "fast",
     run_reader_test: bool = False,
+    run_reader_driven_revision: bool = True,
     ideation_level: Optional[float] = None,
     live_supervisor: bool = False,
     progress_cb: ProgressCb = None,
+    theme_id: Optional[str] = None,
+    rewrite_author_note: Optional[str] = None,
 ) -> dict[str, Any]:
     """按既有 plan 要点（无则兜底）重新生成并覆盖某一章；chapter_index 为 None 时重写当前最后一章。"""
     book_path = book_dir(root, book_id)
@@ -1843,6 +2076,7 @@ def run_rewrite_chapter(
     if iw_raw is None:
         iw_raw = 0.5
     ideation_w = max(0.0, min(1.0, float(iw_raw)))
+    theme_resolved = _resolved_theme_id_for_book(plan_data, request_theme_id=theme_id)
 
     ch_row: Optional[dict[str, Any]] = None
     chs_pl = plan_data.get("chapters")
@@ -1869,7 +2103,12 @@ def run_rewrite_chapter(
 
     ch_title = _fallback_chapter_title(ch_row, idx)
     contract = _format_chapter_contract(
-        idx, ch_row, continuation=(idx > 1), length_scale=length_scale
+        idx,
+        ch_row,
+        continuation=(idx > 1),
+        is_rewrite=(idx > 1),
+        length_scale=length_scale,
+        theme_id=theme_resolved,
     )
 
     system = writer_system.strip()
@@ -1893,10 +2132,16 @@ def run_rewrite_chapter(
         mem_parts.append(voice_block.strip()[:7000])
     mem_parts.append(ideation_instruction(ideation_w))
     mem_parts.append(_REWRITE_TASK_NOTE)
+    ra_block = _rewrite_author_note_instruction(rewrite_author_note or "")
+    if ra_block:
+        mem_parts.append(ra_block)
     if macro_for_writing:
         mem_parts.append(_macro_phase_note_for_chapter(idx, macro_for_writing))
     if length_scale == "short":
         mem_parts.append(_short_story_reader_engagement_instruction())
+        _maybe_append_short_story_romance_writer(
+            mem_parts, length_scale=length_scale, theme_id=theme_resolved
+        )
     if length_scale == "long":
         cl = read_changelog_tail(book_path, max_chars=1200)
         if cl.strip():
@@ -1904,7 +2149,29 @@ def run_rewrite_chapter(
         mem_parts.append(long_novel_wiki_memory_instruction())
     reg_block = build_character_registry_block(book_path, max_chars=3800)
     mem_parts.append(CHARACTER_REGISTRY_INSTRUCTION + "\n" + reg_block)
+    r_prev, r_tmin, r_names = _reader_pipeline_extras(
+        book_path, idx, length_scale, reg_block
+    )
     story_tail = load_chapter_tail_for_prompt(book_path, max_chars=6800)
+    if idx > 1:
+        prev_p = book_path / "chapters" / f"{idx - 1:02d}.md"
+        if prev_p.is_file():
+            try:
+                prev_text = prev_p.read_text(encoding="utf-8")
+            except OSError:
+                prev_text = ""
+            if prev_text.strip().startswith("<!--"):
+                close = prev_text.find("-->")
+                if close != -1:
+                    prev_text = prev_text[close + 3 :].lstrip()
+            prev_for_ctx = prev_text.strip()
+            if len(prev_for_ctx) > 14000:
+                prev_for_ctx = prev_for_ctx[-14000:]
+            if prev_for_ctx:
+                mem_parts.append(
+                    f"【上一章正文】第 {idx - 1} 章\n{prev_for_ctx}\n"
+                    f"{_rewrite_chapter_bridge_instruction(idx - 1, idx)}"
+                )
     mem_parts.append(
         f"【书名】{book_title}\n【全书梗概】\n{premise}\n"
         f"【跨章剧情提要】\n{story_tail or '（尚无累积提要。）'}\n"
@@ -1934,6 +2201,10 @@ def run_rewrite_chapter(
             kb_block=kb_block,
             agent_profile=agent_profile,
             run_reader_test=run_reader_test,
+            run_reader_driven_revision=run_reader_driven_revision,
+            reader_prev_chapter_tail=r_prev,
+            reader_known_names_hint=r_names,
+            reader_target_min_body_chars=r_tmin,
         )
     except RuntimeError as e:
         raise HTTPException(400, str(e)) from e
@@ -2012,12 +2283,14 @@ def run_continue_next_chapter(
     agent_profile: str = "fast",
     sync_book_memory: bool = True,
     run_reader_test: bool = False,
+    run_reader_driven_revision: bool = True,
     ideation_level: Optional[float] = None,
     live_supervisor: bool = False,
     final_supervisor: bool = False,
     progress_cb: ProgressCb = None,
     memory_episodic_keep_last: Optional[int] = None,
     foreshadowing_sync_after_chapter: bool = False,
+    theme_id: Optional[str] = None,
 ) -> dict[str, Any]:
     book_path = book_dir(root, book_id)
     voice_block = ""
@@ -2053,6 +2326,7 @@ def run_continue_next_chapter(
     ideation_w = max(0.0, min(1.0, float(iw_raw)))
     premise = str(plan_data.get("premise") or "")
     book_title = str(plan_data.get("book_title") or plan_data.get("title") or book_id)
+    theme_resolved = _resolved_theme_id_for_book(plan_data, request_theme_id=theme_id)
     length_scale_cont = "medium"
     meta_ls = plan_data.get("meta")
     if isinstance(meta_ls, dict):
@@ -2121,7 +2395,11 @@ def run_continue_next_chapter(
     else:
         chapter_for_contract = {"idx": next_n, "beat": beat_next, "title": title_next}
     contract_block = _format_chapter_contract(
-        next_n, chapter_for_contract, continuation=True, length_scale=length_scale_cont
+        next_n,
+        chapter_for_contract,
+        continuation=True,
+        length_scale=length_scale_cont,
+        theme_id=theme_resolved,
     )
 
     system = writer_system.strip()
@@ -2145,6 +2423,9 @@ def run_continue_next_chapter(
     parts.append(ideation_instruction(ideation_w))
     if length_scale_cont == "short":
         parts.append(_short_story_reader_engagement_instruction())
+        _maybe_append_short_story_romance_writer(
+            parts, length_scale=length_scale_cont, theme_id=theme_resolved
+        )
     if length_scale_cont == "long":
         clc = read_changelog_tail(book_path, max_chars=1200)
         if clc.strip():
@@ -2152,6 +2433,9 @@ def run_continue_next_chapter(
         parts.append(long_novel_wiki_memory_instruction())
     reg_block = build_character_registry_block(book_path, max_chars=3800)
     parts.append(CHARACTER_REGISTRY_INSTRUCTION + "\n" + reg_block)
+    r_prev, r_tmin, r_names = _reader_pipeline_extras(
+        book_path, next_n, length_scale_cont, reg_block
+    )
     story_tail = load_chapter_tail_for_prompt(book_path, max_chars=6800)
     if story_tail.strip():
         parts.append("【跨章剧情提要】\n" + story_tail.strip())
@@ -2176,6 +2460,10 @@ def run_continue_next_chapter(
             kb_block=kb_block,
             agent_profile=agent_profile,
             run_reader_test=run_reader_test,
+            run_reader_driven_revision=run_reader_driven_revision,
+            reader_prev_chapter_tail=r_prev,
+            reader_known_names_hint=r_names,
+            reader_target_min_body_chars=r_tmin,
         )
     except RuntimeError as e:
         raise HTTPException(400, str(e)) from e
@@ -2349,6 +2637,7 @@ def run_continue_chapters(
     agent_profile: str = "fast",
     sync_book_memory: bool = True,
     run_reader_test: bool = False,
+    run_reader_driven_revision: bool = True,
     progress_cb: ProgressCb = None,
     ideation_level: Optional[float] = None,
     live_supervisor: bool = False,
@@ -2356,6 +2645,7 @@ def run_continue_chapters(
     continuation_arc_plan: bool = True,
     memory_episodic_keep_last: Optional[int] = 48,
     foreshadowing_sync_after_chapter: bool = True,
+    theme_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """续写多章：逐章调用 run_continue_next_chapter。"""
     n = max(1, min(int(count), MAX_CONTINUE_CHAPTERS))
@@ -2417,12 +2707,14 @@ def run_continue_chapters(
             agent_profile=agent_profile,
             sync_book_memory=sync_book_memory,
             run_reader_test=run_reader_test,
+            run_reader_driven_revision=run_reader_driven_revision,
             ideation_level=ideation_level,
             live_supervisor=live_supervisor,
             final_supervisor=False,
             progress_cb=progress_cb,
             memory_episodic_keep_last=memory_episodic_keep_last,
             foreshadowing_sync_after_chapter=foreshadowing_sync_after_chapter,
+            theme_id=theme_id,
         )
         ls = last.get("live_supervisor")
         if isinstance(ls, list):
@@ -2470,6 +2762,8 @@ def run_continue_next_chapter_legacy_out(
     ideation_level: Optional[float] = None,
     agent_profile: str = "fast",
     run_reader_test: bool = False,
+    run_reader_driven_revision: bool = True,
+    theme_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """兼容旧版 out/ 前缀_第NN章.md；编排模式与书本续写一致（fast / full）。"""
     out_dir = root / "out"
@@ -2566,6 +2860,11 @@ def run_continue_next_chapter_legacy_out(
     parts.append(ideation_instruction(ideation_w))
     if length_scale_legacy == "short":
         parts.append(_short_story_reader_engagement_instruction())
+        _maybe_append_short_story_romance_writer(
+            parts,
+            length_scale=length_scale_legacy,
+            theme_id=str(theme_id or "general").strip().lower(),
+        )
     prev_for_ctx = last_text.strip()
     if len(prev_for_ctx) > 14000:
         prev_for_ctx = prev_for_ctx[-14000:]
@@ -2582,6 +2881,16 @@ def run_continue_next_chapter_legacy_out(
     if ap not in ("fast", "full"):
         ap = "fast"
     try:
+        pl0 = _chapter_body_plain_from_file(last_text).strip()
+        r_prev_leg = pl0[-2000:] if len(pl0) > 2000 else pl0
+    except Exception:
+        r_prev_leg = ""
+    rtm = (os.environ.get("AIWRITER_READER_TARGET_MIN_BODY_CHARS") or "").strip()
+    if rtm.isdigit():
+        r_tmin_leg = int(rtm)
+    else:
+        r_tmin_leg = 600 if length_scale_legacy == "short" else (1800 if length_scale_legacy == "long" else 1400)
+    try:
         body, alog = run_chapter_with_agents(
             system=system,
             user_payload=user_full,
@@ -2590,6 +2899,10 @@ def run_continue_next_chapter_legacy_out(
             kb_block=kb_block,
             agent_profile=ap,
             run_reader_test=run_reader_test,
+            run_reader_driven_revision=run_reader_driven_revision,
+            reader_prev_chapter_tail=r_prev_leg,
+            reader_known_names_hint="",
+            reader_target_min_body_chars=r_tmin_leg,
         )
     except RuntimeError as e:
         raise HTTPException(400, str(e)) from e

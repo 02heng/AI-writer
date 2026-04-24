@@ -235,6 +235,10 @@ class PipelineFromTitleBody(BaseModel):
         description="fast=单 Writer；full=多智能体链（Character/Continuity/Editor/Safety 等）",
     )
     run_reader_test: bool = Field(default=False, description="full 模式下是否追加盲测读者智能体")
+    run_reader_driven_revision: bool = Field(
+        default=True,
+        description="与 run_reader_test 同开时：读者发现篇幅明显不足、人名/称谓与上章矛盾等，是否自动追加一轮 Writer 修订并再过 Safety",
+    )
     ideation_level: float = Field(
         default=0.5,
         ge=0,
@@ -283,6 +287,10 @@ class PipelineContinueBody(BaseModel):
     writing_temperature: float = Field(default=0.82, ge=0, le=2)
     agent_profile: str = Field(default="fast")
     run_reader_test: bool = Field(default=False)
+    run_reader_driven_revision: bool = Field(
+        default=True,
+        description="full+盲测时读者发现问题后是否自动让 Writer 改稿一轮（仅 book_id / 旧 out 续写均适用）",
+    )
     chapter_count: int = Field(
         default=1,
         ge=1,
@@ -335,6 +343,10 @@ class PipelineRewriteChapterBody(BaseModel):
     writing_temperature: float = Field(default=0.82, ge=0, le=2)
     agent_profile: str = Field(default="fast")
     run_reader_test: bool = Field(default=False)
+    run_reader_driven_revision: bool = Field(
+        default=True,
+        description="full+盲测时读者发现问题后是否自动让 Writer 改稿一轮",
+    )
     ideation_level: Optional[float] = Field(
         default=None,
         ge=0,
@@ -342,6 +354,11 @@ class PipelineRewriteChapterBody(BaseModel):
         description="不传则沿用书本 plan.meta.ideation_level",
     )
     live_supervisor: bool = Field(default=False)
+    rewrite_author_note: Optional[str] = Field(
+        default=None,
+        max_length=8000,
+        description="用户对该章重写的补充意图、想改的方向等，会注入模型提示，不写入 plan",
+    )
 
 
 class TrashRestoreBody(BaseModel):
@@ -728,6 +745,7 @@ def pipeline_from_title(body: PipelineFromTitleBody):
             writing_temp=body.writing_temperature,
             agent_profile=ap,
             run_reader_test=bool(body.run_reader_test),
+            run_reader_driven_revision=bool(body.run_reader_driven_revision),
             planned_total_chapters=body.planned_total_chapters,
             ideation_level=body.ideation_level,
             user_book_note=body.user_book_note,
@@ -739,6 +757,7 @@ def pipeline_from_title(body: PipelineFromTitleBody):
                 else None
             ),
             foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
+            theme_id=str(body.theme_id or "general"),
         )
     except HTTPException:
         raise
@@ -792,6 +811,7 @@ async def pipeline_from_title_stream(body: PipelineFromTitleBody):
                     writing_temp=body.writing_temperature,
                     agent_profile=ap,
                     run_reader_test=bool(body.run_reader_test),
+                    run_reader_driven_revision=bool(body.run_reader_driven_revision),
                     progress_cb=progress,
                     planned_total_chapters=body.planned_total_chapters,
                     ideation_level=body.ideation_level,
@@ -805,6 +825,7 @@ async def pipeline_from_title_stream(body: PipelineFromTitleBody):
                         else None
                     ),
                     foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
+                    theme_id=str(body.theme_id or "general"),
                 )
                 q.put(("done", r))
             except HTTPException as he:
@@ -878,12 +899,14 @@ def pipeline_continue(body: PipelineContinueBody):
                     writing_temp=body.writing_temperature,
                     agent_profile=ap,
                     run_reader_test=bool(body.run_reader_test),
+                    run_reader_driven_revision=bool(body.run_reader_driven_revision),
                     ideation_level=body.ideation_level,
                     live_supervisor=bool(body.live_supervisor),
                     final_supervisor=bool(body.final_supervisor),
                     continuation_arc_plan=bool(body.continuation_arc_plan),
                     memory_episodic_keep_last=episodic_keep,
                     foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
+                    theme_id=str(body.theme_id or "general"),
                 )
             else:
                 result = run_continue_next_chapter(
@@ -897,11 +920,13 @@ def pipeline_continue(body: PipelineContinueBody):
                     writing_temp=body.writing_temperature,
                     agent_profile=ap,
                     run_reader_test=bool(body.run_reader_test),
+                    run_reader_driven_revision=bool(body.run_reader_driven_revision),
                     ideation_level=body.ideation_level,
                     live_supervisor=bool(body.live_supervisor),
                     final_supervisor=bool(body.final_supervisor),
                     memory_episodic_keep_last=episodic_keep,
                     foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
+                    theme_id=str(body.theme_id or "general"),
                 )
         elif sp:
             prefix = safe_series_prefix(sp)
@@ -917,6 +942,8 @@ def pipeline_continue(body: PipelineContinueBody):
                 ideation_level=body.ideation_level,
                 agent_profile=ap,
                 run_reader_test=bool(body.run_reader_test),
+                run_reader_driven_revision=bool(body.run_reader_driven_revision),
+                theme_id=str(body.theme_id or "general"),
             )
         else:
             raise HTTPException(400, "请提供 book_id（推荐）或 series_prefix（旧书库）")
@@ -959,8 +986,11 @@ def pipeline_rewrite_chapter(body: PipelineRewriteChapterBody):
             writing_temp=body.writing_temperature,
             agent_profile=ap,
             run_reader_test=bool(body.run_reader_test),
+            run_reader_driven_revision=bool(body.run_reader_driven_revision),
             ideation_level=body.ideation_level,
             live_supervisor=bool(body.live_supervisor),
+            theme_id=str(body.theme_id or "general"),
+            rewrite_author_note=body.rewrite_author_note,
         )
     except HTTPException:
         raise

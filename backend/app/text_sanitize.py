@@ -15,7 +15,7 @@ def strip_markdown_double_asterisk_bold(text: str) -> str:
 
 
 def strip_markdown_line_prefixes(text: str) -> str:
-    """Remove line-leading Markdown blockquotes (>), bullets (- * +), and ordered '1. ' lists."""
+    """Remove line-leading Markdown blockquotes (>), bullets (- * +), ordered '1. ' lists, ATX # headings, and any remaining '#'."""
     out: list[str] = []
     for line in text.split("\n"):
         s = line
@@ -30,6 +30,10 @@ def strip_markdown_line_prefixes(text: str) -> str:
         m = re.match(r"^([ \t]*)([1-9]\d?)\.[ \t]+", s)
         if m:
             s = m.group(1) + s[m.end() :]
+        m = re.match(r"^([ \t]*)(#{1,6})([ \t]*)(.*)$", s)
+        if m:
+            s = m.group(1) + m.group(4)
+        s = s.replace("#", "")
         out.append(s)
     return "\n".join(out)
 
@@ -37,6 +41,37 @@ def strip_markdown_line_prefixes(text: str) -> str:
 def strip_comma_hyphen_glitch(text: str) -> str:
     """Turn ASCII `,-` glitches (comma + hyphen) into a Chinese comma for prose."""
     return re.sub(r",\s*-\s*", "，", text)
+
+
+def relax_runon_cjk_prose_to_paragraphs(text: str) -> str:
+    """
+    将「几乎无换行的一整块长文」粗分为多段（按句对合并），不改动本就分段良好的正文。
+
+    模型或 Editor 偶发输出除标题外整章一段，影响阅读与渲染；在启发式认为属于 run-on 时做恢复。
+    """
+    s = (text or "").strip()
+    if len(s) < 1000:
+        return text
+    # 已有多段空行，不动
+    if s.count("\n\n") >= 2:
+        return text
+    # 换行已足够多
+    n_nl = s.count("\n")
+    if n_nl >= max(10, len(s) // 500):
+        return text
+    if s.count("。") < 6 and s.count("！") + s.count("？") < 2:
+        return text
+    parts = re.split(r"(?<=[。！？…])", s)
+    parts = [p for p in (x.strip() for x in parts) if p]
+    if len(parts) < 4:
+        return text
+    out: list[str] = []
+    for i in range(0, len(parts), 2):
+        out.append("".join(parts[i : i + 2]).strip())
+    merged = "\n\n".join(out)
+    if len(merged) < len(s) * 0.9:
+        return text
+    return merged
 
 
 def strip_aiwriter_prose_noise(text: str) -> str:

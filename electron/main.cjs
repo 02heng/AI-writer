@@ -180,7 +180,7 @@ function registerAllIpcHandlers() {
       const s = JSON.parse(raw);
       return {
         deepseekApiKey: s.deepseekApiKey || '',
-        deepseekModel: s.deepseekModel || 'deepseek-chat',
+        deepseekModel: s.deepseekModel || 'deepseek-v4-flash',
         booksRoot: s.booksRoot || '',
         snapshotAgentEnabled: Boolean(s.snapshotAgentEnabled),
         snapshotPageUrl:
@@ -191,7 +191,7 @@ function registerAllIpcHandlers() {
     } catch {
       return {
         deepseekApiKey: '',
-        deepseekModel: 'deepseek-chat',
+        deepseekModel: 'deepseek-v4-flash',
         booksRoot: '',
         snapshotAgentEnabled: false,
         snapshotPageUrl: 'https://fanqienovel.com/main/writer/data?bookId=7628439872088329241',
@@ -221,7 +221,7 @@ function registerAllIpcHandlers() {
     }
     const merged = {
       deepseekApiKey: data.deepseekApiKey ?? prev.deepseekApiKey ?? '',
-      deepseekModel: data.deepseekModel ?? prev.deepseekModel ?? 'deepseek-chat',
+      deepseekModel: data.deepseekModel ?? prev.deepseekModel ?? 'deepseek-v4-flash',
       booksRoot: data.booksRoot !== undefined ? data.booksRoot : prev.booksRoot || '',
       snapshotAgentEnabled:
         data.snapshotAgentEnabled !== undefined

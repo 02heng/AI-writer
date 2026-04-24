@@ -115,6 +115,27 @@ class TestPipelineHelpers:
         assert "，" in sanitize_chapter_body("沉默,-良久")
         assert ",-" not in sanitize_chapter_body("沉默,-良久")
 
+    def test_sanitize_chapter_body_strips_hash_marks(self) -> None:
+        from app.pipeline import sanitize_chapter_body
+
+        out = sanitize_chapter_body("## 不应出现\n正文#号与###小节")
+        assert "#" not in out
+        assert "不应出现" in out
+        assert "正文号与" in out
+        assert "小节" in out
+
+    def test_sanitize_chapter_body_runon_adds_paragraphs(self) -> None:
+        """单段一坨长文在足够长、句号足够多时粗分为多段（按句对）。"""
+        from app.pipeline import sanitize_chapter_body
+
+        block = "。".join(f"这是第{k}句试验性长文内容" for k in range(48)) + "。"
+        one = block + block
+        assert "\n" not in one
+        assert len(one) >= 1000
+        out = sanitize_chapter_body(one)
+        assert "\n\n" in out
+        assert out.count("\n\n") >= 1
+
     def test_strip_common_prefix_with_previous_opening(self) -> None:
         from app.text_sanitize import strip_common_prefix_with_previous_opening
 
@@ -190,6 +211,15 @@ class TestChapterContract:
         
         assert "续写" in result
 
+    def test_format_chapter_contract_rewrite_continuation_uses_rewrite_label(self) -> None:
+        from app.pipeline import _format_chapter_contract
+
+        chapter = {"idx": 3, "beat": "重写要点"}
+        result = _format_chapter_contract(3, chapter, continuation=True, is_rewrite=True)
+
+        assert "重写" in result
+        assert "续写" not in result.split("【本章写作合同】")[1].split("\n")[0]
+
     def test_format_chapter_contract_space_for_later(self) -> None:
         from app.pipeline import _format_chapter_contract
 
@@ -222,6 +252,19 @@ class TestChapterContract:
         result = _format_chapter_contract(1, chapter, length_scale="short")
         assert "【篇幅目标】" in result
         assert "2000～4000" in result
+
+    def test_format_chapter_contract_short_romance_adds_structure_hint(self) -> None:
+        from app.pipeline import _format_chapter_contract
+
+        chapter = {"idx": 1, "beat": "开局"}
+        result = _format_chapter_contract(1, chapter, length_scale="short", theme_id="romance")
+        assert "结构提示·短篇言情" in result
+
+    def test_scale_instruction_short_romance_appends_web_romance_block(self) -> None:
+        from app.pipeline import _scale_instruction
+
+        block = _scale_instruction("short", "romance")
+        assert "【短篇·网文体·言情专规】" in block
 
 
 class TestNormalizeChapterEntry:

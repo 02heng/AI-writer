@@ -108,7 +108,7 @@ class DeepSeekProvider(LLMProvider):
     """DeepSeek API provider (OpenAI-compatible)."""
 
     DEFAULT_BASE_URL = "https://api.deepseek.com"
-    DEFAULT_MODEL = "deepseek-chat"
+    DEFAULT_MODEL = "deepseek-v4-flash"
 
     def __init__(
         self,
@@ -380,7 +380,7 @@ def get_llm_provider(
     """Get an LLM provider based on model ID.
 
     Args:
-        model_id: Model identifier (e.g., "deepseek-chat", "gpt-4o", "claude-sonnet")
+        model_id: Model identifier (e.g., "deepseek-v4-flash", "gpt-4o", "claude-sonnet")
         api_key: Optional API key override
         **kwargs: Additional provider-specific options
 
@@ -435,7 +435,7 @@ def list_available_providers() -> list[dict[str, Any]]:
         "name": "deepseek",
         "available": HAS_OPENAI,
         "configured": bool(os.environ.get("DEEPSEEK_API_KEY")),
-        "models": ["deepseek-chat", "deepseek-reasoner"],
+        "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
     })
 
     # OpenAI

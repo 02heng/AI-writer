@@ -63,7 +63,7 @@
               <label class="lbl">DeepSeek API Key</label>
               <input type="password" id="api-key" class="inp" autocomplete="off" placeholder="sk-…" />
               <label class="lbl">模型 ID</label>
-              <input type="text" id="model-id" class="inp" value="deepseek-chat" />
+              <input type="text" id="model-id" class="inp" value="deepseek-v4-flash" />
               <label class="lbl">书本存放目录（可选）</label>
               <div class="books-root-row">
                 <input type="text" id="books-root-path" class="inp" placeholder="默认：UserData/books，可改为绝对路径" />
@@ -169,6 +169,13 @@
                     <span>每章追加盲测读者（仅 full，额外 API）</span>
                   </label>
                 </div>
+                <div>
+                  <label class="lbl" for="pipeline-reader-revision">&nbsp;</label>
+                  <label class="chk-row chk-row--tight" style="margin: 0; padding-top: 0.35rem">
+                    <input type="checkbox" id="pipeline-reader-revision" checked />
+                    <span>读者报篇幅/人名等问题时，自动追加一轮作者改稿（与上项同用）</span>
+                  </label>
+                </div>
                 <div class="form-col-span2">
                   <label class="chk-row chk-row--tight">
                     <input type="checkbox" id="pipeline-live-supervisor" checked />
@@ -241,6 +248,13 @@
                     <span>每章追加盲测读者（仅 full，额外 API）</span>
                   </label>
                 </div>
+                <div>
+                  <label class="lbl" for="continue-reader-revision">&nbsp;</label>
+                  <label class="chk-row chk-row--tight" style="margin: 0; padding-top: 0.35rem">
+                    <input type="checkbox" id="continue-reader-revision" checked />
+                    <span>读者报篇幅/人名等问题时，自动追加一轮作者改稿</span>
+                  </label>
+                </div>
                 <div class="form-col-span2">
                   <label class="chk-row chk-row--tight">
                     <input type="checkbox" id="continue-live-supervisor" checked />
@@ -279,7 +293,7 @@
               <h3 class="sub-block-title">重写已有章节</h3>
               <p class="rail-hint">
                 仅支持<strong>书本（新库）</strong>。按 <span class="inline-code">plan.json</span> 中该章要点重新生成正文并<strong>覆盖</strong>
-                <span class="inline-code">chapters/NN.md</span>；不写新章号。章号留空表示重写当前<strong>最后一章</strong>。左侧勾选的知识库会参与重写。
+                <span class="inline-code">chapters/NN.md</span>；不写新章号。章号留空表示重写当前<strong>最后一章</strong>。左侧勾选的知识库会参与重写。可在下方填写<strong>本章重写补充意图</strong>（桥段、侧重、删减方向等）。
               </p>
               <div class="form-grid">
                 <div class="form-col-span2">
@@ -312,6 +326,13 @@
                     <span>追加盲测读者（仅 full，额外 API）</span>
                   </label>
                 </div>
+                <div>
+                  <label class="lbl" for="rewrite-reader-revision">&nbsp;</label>
+                  <label class="chk-row chk-row--tight" style="margin: 0; padding-top: 0.35rem">
+                    <input type="checkbox" id="rewrite-reader-revision" checked />
+                    <span>读者报问题则自动让作者再改一稿</span>
+                  </label>
+                </div>
                 <div class="form-col-span2">
                   <label class="chk-row chk-row--tight">
                     <input type="checkbox" id="rewrite-live-supervisor" checked />
@@ -323,6 +344,15 @@
                     <input type="checkbox" id="cb-rewrite-memory" checked />
                     <span>重写时注入长期记忆</span>
                   </label>
+                </div>
+                <div class="form-col-span2">
+                  <label class="lbl" for="rewrite-author-note">本章重写 · 补充意图（可选）</label>
+                  <textarea
+                    id="rewrite-author-note"
+                    class="inp inp-area"
+                    rows="4"
+                    placeholder="例如：加强悬念结尾；某角色语气更冷；打斗缩短、心理加长；必须与第 N 章伏笔呼应……"
+                  ></textarea>
                 </div>
                 <div class="form-actions">
                   <button type="button" class="btn btn-primary" id="btn-rewrite-chapter">开始重写</button>

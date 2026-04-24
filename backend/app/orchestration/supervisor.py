@@ -40,6 +40,8 @@ def compact_agent_log(alog: dict[str, Any]) -> dict[str, Any]:
             }
         )
     out: dict[str, Any] = {"profile": alog.get("profile"), "steps": slim}
+    if alog.get("reader_driven_revision"):
+        out["reader_driven_revision"] = True
     if isinstance(alog.get("reader_test"), dict):
         rt = alog["reader_test"]
         out["reader_test_keys"] = list(rt.keys())[:12]

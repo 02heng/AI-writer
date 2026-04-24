@@ -78,6 +78,6 @@
 
 - **Orchestrator**：流水线内以 `orchestration/state.json` 记录步骤与 `draft_version`（按章递增）。
 - **fast**：仅 Writer，与早期行为接近（但落盘在 `books/`）。
-- **full**：Writer → Character（对白口吻）→ Continuity（违规则一次修订）→ Editor（可选全文替换）→ Safety（block 时替换）→ 可选 Reader 盲测（结果写入 agent 日志，不自动改文）。
+- **full**：Writer → Character（对白口吻）→ Continuity（违规则一次修订）→ Editor（可选全文替换）→ **ProseTighten**（文风险喻/文艺腔白描清洗，见 `agent_prose_tighten`）→ Safety（block 时替换）→ 可选 Reader 盲测；若开启**读者驱动改稿**（`run_reader_driven_revision`，默认开），Reader 报篇幅明显过短、人名/称谓与上章矛盾等时，**追加一轮 Writer** 修订，再经 **ProseTighten** 与 Safety。环境变量 `AIWRITER_PROSE_WASH=0` 可关闭文面清洗。盲测与修订结果写入 `orchestration/agent_runs.jsonl`（`reader_test`、`reader_driven_revision` 等）。
 
-前端「编排模式」与「盲测读者」勾选会传入 `agent_profile` / `run_reader_test`（旧库续写仍为单次生成，不传编排参数）。
+前端「编排模式」与「盲测读者」勾选会传入 `agent_profile` / `run_reader_test`；读者驱动改稿可通过 API 体 `run_reader_driven_revision` 关闭。`fast` 模式仍仅单次 Writer，不跑 Reader 链。旧库 `out/` 续写：传入编排参数时行为与 book_id 一致。

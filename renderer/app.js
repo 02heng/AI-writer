@@ -1310,7 +1310,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (window.aiWriter?.loadSettings) {
     const s = await window.aiWriter.loadSettings();
     document.getElementById('api-key').value = s.deepseekApiKey || '';
-    document.getElementById('model-id').value = s.deepseekModel || 'deepseek-chat';
+    document.getElementById('model-id').value = s.deepseekModel || 'deepseek-v4-flash';
     const br = document.getElementById('books-root-path');
     if (br) br.value = s.booksRoot || '';
     const snapCb = document.getElementById('cb-snapshot-agent');
@@ -1440,6 +1440,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       kb_names: selectedKbFiles(),
       agent_profile: document.getElementById('pipeline-agent-profile')?.value || 'fast',
       run_reader_test: document.getElementById('pipeline-reader-test')?.checked ?? false,
+      run_reader_driven_revision: document.getElementById('pipeline-reader-revision')?.checked ?? true,
       live_supervisor: document.getElementById('pipeline-live-supervisor')?.checked ?? false,
       final_supervisor: document.getElementById('pipeline-final-supervisor')?.checked ?? false,
       foreshadowing_sync_after_chapter: document.getElementById('pipeline-foreshadow-sync')?.checked ?? false,
@@ -1615,6 +1616,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         kb_names: selectedKbFiles(),
         agent_profile: document.getElementById('continue-agent-profile')?.value || 'fast',
         run_reader_test: document.getElementById('continue-reader-test')?.checked ?? false,
+        run_reader_driven_revision: document.getElementById('continue-reader-revision')?.checked ?? true,
         live_supervisor: document.getElementById('continue-live-supervisor')?.checked ?? false,
         final_supervisor: document.getElementById('continue-final-supervisor')?.checked ?? false,
         continuation_arc_plan: document.getElementById('continue-arc-plan')?.checked ?? true,
@@ -1712,6 +1714,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         chapter_index = n;
       }
+      const note = document.getElementById('rewrite-author-note')?.value?.trim() || '';
       const payload = {
         book_id: raw.slice(5),
         chapter_index,
@@ -1721,7 +1724,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         kb_names: selectedKbFiles(),
         agent_profile: document.getElementById('rewrite-agent-profile')?.value || 'fast',
         run_reader_test: document.getElementById('rewrite-reader-test')?.checked ?? false,
-        live_supervisor: document.getElementById('rewrite-live-supervisor')?.checked ?? false
+        run_reader_driven_revision: document.getElementById('rewrite-reader-revision')?.checked ?? true,
+        live_supervisor: document.getElementById('rewrite-live-supervisor')?.checked ?? false,
+        ...(note ? { rewrite_author_note: note } : {})
       };
       const data = await fetchJson('/api/pipeline/rewrite-chapter', {
         method: 'POST',
@@ -1776,7 +1781,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       await window.aiWriter.saveSettings({
         deepseekApiKey: document.getElementById('api-key').value.trim(),
-        deepseekModel: document.getElementById('model-id').value.trim() || 'deepseek-chat',
+        deepseekModel: document.getElementById('model-id').value.trim() || 'deepseek-v4-flash',
         booksRoot: document.getElementById('books-root-path')?.value?.trim() || '',
         snapshotAgentEnabled: document.getElementById('cb-snapshot-agent')?.checked ?? false,
         snapshotPageUrl: document.getElementById('snapshot-page-url')?.value?.trim() || '',
