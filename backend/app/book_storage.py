@@ -383,6 +383,11 @@ def _remove_book_from_index(data_root: Path, book_id: str) -> None:
 
 
 def move_book_to_trash(data_root: Path, book_id: str) -> dict[str, Any]:
+    """将 `books/<id>/` 整夹移动到 `books_trash/<id>/`，并从 `books/index.json` 移除。
+
+    在 Windows 上若本进程或其它程序（杀软、资源管理器预览、外置工具）正占用目录内文件，
+    `shutil.move` 会报 WinError 32 等，原先会直接 500；此处重试并返回可读说明。
+    """
     safe = re.sub(r"[^a-f0-9]", "", book_id.lower())[:16]
     if len(safe) < 8:
         raise HTTPException(status_code=400, detail="无效的书本 ID")
@@ -394,9 +399,25 @@ def move_book_to_trash(data_root: Path, book_id: str) -> dict[str, Any]:
     dst = tr / safe
     if dst.exists():
         shutil.rmtree(dst, ignore_errors=True)
-    shutil.move(str(src), str(dst))
-    _remove_book_from_index(data_root, safe)
-    return {"ok": True, "book_id": safe}
+    last_err: Optional[BaseException] = None
+    for attempt in range(3):
+        try:
+            shutil.move(str(src), str(dst))
+            _remove_book_from_index(data_root, safe)
+            return {"ok": True, "book_id": safe}
+        except OSError as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(0.2 * (attempt + 1))
+                continue
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "无法将本书移入回收站：有程序正在占用该书目录下的文件（常见于本机杀软/索引、"
+            "在资源管理器中打开了该书文件夹或预览、或其它编辑器持锁）。请关闭占用后重试，"
+            "或先退出本应用再删移该目录。"
+        ),
+    ) from last_err
 
 
 def list_trashed_books(data_root: Path) -> list[dict[str, Any]]:

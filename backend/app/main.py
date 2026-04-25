@@ -254,6 +254,10 @@ class PipelineFromTitleBody(BaseModel):
         default=False,
         description="为真时每章写入后调用监督智能体快审，并通过流式事件 supervisor_chapter 推送",
     )
+    supervisor_local_rewrite: bool = Field(
+        default=True,
+        description="与 live_supervisor+agent_profile=full 同开时：监督发现中高风险或可改文面 issue 时，将反馈回馈 Writer 做局部修订（仍输出整章）后再落盘；可用环境变量 AIWRITER_SUPERVISOR_LOCAL_REWRITE=0 关闭",
+    )
     final_supervisor: bool = Field(
         default=False,
         description="为真时全书章完成后运行总监督元审查，写入 orchestration/state.json 的 open_issues，并返回 supervisor_final",
@@ -307,6 +311,10 @@ class PipelineContinueBody(BaseModel):
         default=False,
         description="为真时每章续写完成后做监督快审（仅 book_id 模式）",
     )
+    supervisor_local_rewrite: bool = Field(
+        default=True,
+        description="续写时：监督快审后是否允许 full 模式下按 issues 局部回写；AIWRITER_SUPERVISOR_LOCAL_REWRITE=0 关闭",
+    )
     final_supervisor: bool = Field(
         default=False,
         description="为真时本批续写结束后运行总监督并写入 orchestration/state.json（仅 book_id）",
@@ -354,6 +362,10 @@ class PipelineRewriteChapterBody(BaseModel):
         description="不传则沿用书本 plan.meta.ideation_level",
     )
     live_supervisor: bool = Field(default=False)
+    supervisor_local_rewrite: bool = Field(
+        default=True,
+        description="监督快审后是否允许 full 模式下按 issues 局部回写；AIWRITER_SUPERVISOR_LOCAL_REWRITE=0 关闭",
+    )
     rewrite_author_note: Optional[str] = Field(
         default=None,
         max_length=8000,
@@ -750,6 +762,7 @@ def pipeline_from_title(body: PipelineFromTitleBody):
             ideation_level=body.ideation_level,
             user_book_note=body.user_book_note,
             live_supervisor=bool(body.live_supervisor),
+            supervisor_local_rewrite=bool(body.supervisor_local_rewrite),
             final_supervisor=bool(body.final_supervisor),
             memory_episodic_keep_last=(
                 int(body.memory_episodic_keep_last)
@@ -817,6 +830,7 @@ async def pipeline_from_title_stream(body: PipelineFromTitleBody):
                     ideation_level=body.ideation_level,
                     user_book_note=body.user_book_note,
                     live_supervisor=bool(body.live_supervisor),
+                    supervisor_local_rewrite=bool(body.supervisor_local_rewrite),
                     final_supervisor=bool(body.final_supervisor),
                     memory_episodic_keep_last=(
                         int(body.memory_episodic_keep_last)
@@ -902,6 +916,7 @@ def pipeline_continue(body: PipelineContinueBody):
                     run_reader_driven_revision=bool(body.run_reader_driven_revision),
                     ideation_level=body.ideation_level,
                     live_supervisor=bool(body.live_supervisor),
+                    supervisor_local_rewrite=bool(body.supervisor_local_rewrite),
                     final_supervisor=bool(body.final_supervisor),
                     continuation_arc_plan=bool(body.continuation_arc_plan),
                     memory_episodic_keep_last=episodic_keep,
@@ -923,6 +938,7 @@ def pipeline_continue(body: PipelineContinueBody):
                     run_reader_driven_revision=bool(body.run_reader_driven_revision),
                     ideation_level=body.ideation_level,
                     live_supervisor=bool(body.live_supervisor),
+                    supervisor_local_rewrite=bool(body.supervisor_local_rewrite),
                     final_supervisor=bool(body.final_supervisor),
                     memory_episodic_keep_last=episodic_keep,
                     foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
@@ -989,6 +1005,7 @@ def pipeline_rewrite_chapter(body: PipelineRewriteChapterBody):
             run_reader_driven_revision=bool(body.run_reader_driven_revision),
             ideation_level=body.ideation_level,
             live_supervisor=bool(body.live_supervisor),
+            supervisor_local_rewrite=bool(body.supervisor_local_rewrite),
             theme_id=str(body.theme_id or "general"),
             rewrite_author_note=body.rewrite_author_note,
         )

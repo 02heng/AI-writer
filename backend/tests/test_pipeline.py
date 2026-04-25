@@ -124,6 +124,24 @@ class TestPipelineHelpers:
         assert "正文号与" in out
         assert "小节" in out
 
+    def test_sanitize_chapter_body_strips_leading_dizhang_line(self) -> None:
+        """正文开头「第N章」与入库 ## 章题重复，须洗掉。"""
+        from app.pipeline import sanitize_chapter_body
+
+        out = sanitize_chapter_body("第1章\n\n他推开门。")
+        assert "第1章" not in out.split("\n")[0]
+        assert "他推开门" in out
+
+        out2 = sanitize_chapter_body("## 第 2 章 · 副题\n\n正文一段。")
+        assert out2.split("\n", 1)[0].strip().startswith("正文")
+
+        out3 = sanitize_chapter_body("第一章\n\n起笔。")
+        assert not out3.lstrip().startswith("第")
+        assert "起笔" in out3
+
+        out4 = sanitize_chapter_body("第1章是个长句子不会被整行删。")
+        assert "第1章" in out4
+
     def test_sanitize_chapter_body_collapses_ascii_quote_linebreaks(self) -> None:
         from app.pipeline import sanitize_chapter_body
 

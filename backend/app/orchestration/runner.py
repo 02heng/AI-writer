@@ -18,6 +18,7 @@ from .agents import (
 
 _READER_REVISION_ENV = "AIWRITER_READER_DRIVEN_REVISION"
 _PROSE_WASH_ENV = "AIWRITER_PROSE_WASH"
+_SUPERVISOR_LOCAL_REWRITE_ENV = "AIWRITER_SUPERVISOR_LOCAL_REWRITE"
 
 
 def _env_prose_wash_enabled() -> bool:
@@ -28,6 +29,35 @@ def _env_prose_wash_enabled() -> bool:
 def _env_reader_driven_revision_enabled() -> bool:
     v = (os.environ.get(_READER_REVISION_ENV) or "1").strip().lower()
     return v not in ("0", "false", "no", "off")
+
+
+def supervisor_local_rewrite_enabled() -> bool:
+    """监督快审后是否允许根据 issues 追加一轮 Writer 局部改稿。环境变量关断：AIWRITER_SUPERVISOR_LOCAL_REWRITE=0。"""
+    v = (os.environ.get(_SUPERVISOR_LOCAL_REWRITE_ENV) or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def should_run_supervisor_local_revision(review: dict[str, Any]) -> bool:
+    """监督返回 JSON：beat 明显偏离，或有 med/high 且可改文面的 target_agent 时，触发局部回写。"""
+    if not isinstance(review, dict):
+        return False
+    ba = str(review.get("beat_alignment") or "").lower()
+    if ba in ("weak", "off"):
+        return True
+    issues = review.get("issues")
+    if not isinstance(issues, list):
+        return False
+    targets = {"writer", "character", "continuity", "editor"}
+    for it in issues:
+        if not isinstance(it, dict):
+            continue
+        sev = str(it.get("severity") or "").lower()
+        if sev not in ("med", "medium", "high"):
+            continue
+        ta = str(it.get("target_agent") or "").strip().lower()
+        if ta in targets:
+            return True
+    return False
 
 
 def _plain_body_char_count(text: str) -> int:
@@ -244,6 +274,62 @@ def run_chapter_with_agents(
                 except Exception as e:
                     log["steps"].append({"agent": "WriterReaderRevision", "ok": False, "error": str(e)})
 
+    return text.strip(), log
+
+
+def run_supervisor_local_rewrite(
+    *,
+    system: str,
+    user_payload: str,
+    chapter_plain: str,
+    review: dict[str, Any],
+    premise: str,
+    writing_temp: float,
+    run_prose_wash: bool = True,
+) -> tuple[str, dict[str, Any]]:
+    """
+    监督快审发现问题后，将 review 摘要注入 Writer，做**最小必要**的局部修订；仍须输出完整章，再经 ProseTighten（可关）与 Safety。
+    """
+    log: dict[str, Any] = {"ok": True, "steps": []}
+    brief = {
+        "supervisor_review": {
+            "summary": review.get("summary"),
+            "beat_alignment": review.get("beat_alignment"),
+            "issues": review.get("issues"),
+            "next_chapter_notes": review.get("next_chapter_notes"),
+        }
+    }
+    fb = json.dumps(brief, ensure_ascii=False)[:10000]
+    add_p = (
+        "\n\n【监督审查 · 须做局部修订（最小改动）】\n"
+        "以下为监督智能体对已定稿本章的快审结果。请**只修改与 issues 或 beat_alignment 直接相关的句段**；"
+        "未点名的段落保持原句（仅允许为衔接而做必要微调，禁止全章重洗或改换文体）。\n"
+        "若问题涉及时序、称谓、空间或物理逻辑：只改问题处。输出**完整本章正文**（仅小说，不要标题、作者按或本说明）。\n"
+        + fb
+        + "\n\n【当前正文（在上一版上改）】\n"
+        + (chapter_plain or "")[:30000]
+    )
+    text = agent_writer_draft(
+        system=system,
+        user_payload=user_payload + add_p,
+        temperature=max(0.4, float(writing_temp) - 0.1),
+    )
+    log["steps"].append({"agent": "WriterSupervisorLocal", "ok": True})
+    text = (text or "").strip()
+    text = _apply_prose_tighten(text, premise, log, run_prose_wash=run_prose_wash)
+    try:
+        safe = agent_safety_pass(chapter_text=text, temperature=0.25)
+        level = str(safe.get("level") or "ok").lower()
+        san = str(safe.get("sanitized_text") or "").strip()
+        if level == "block" and san:
+            text = san
+        log["steps"].append(
+            {"agent": "Safety", "ok": True, "after": "supervisor_local", "level": level}
+        )
+    except Exception as e:
+        log["steps"].append(
+            {"agent": "Safety", "ok": False, "after": "supervisor_local", "error": str(e)}
+        )
     return text.strip(), log
 
 

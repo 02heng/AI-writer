@@ -50,7 +50,13 @@ from .memory_store import (
     read_rollup,
     write_rollup,
 )
-from .orchestration.runner import orchestrator_bump_state, run_chapter_with_agents
+from .orchestration.runner import (
+    orchestrator_bump_state,
+    run_chapter_with_agents,
+    run_supervisor_local_rewrite,
+    should_run_supervisor_local_revision,
+    supervisor_local_rewrite_enabled,
+)
 from .character_auto_seed import auto_seed_characters_after_chapter
 from .character_profiles import (
     CHARACTER_REGISTRY_INSTRUCTION,
@@ -101,9 +107,13 @@ def _maybe_refresh_kb_synthesis(
         logger.warning("kb_synthesis after ch %s: %s", chapter_index, e)
 
 
-def _live_supervisor_after_chapter(
+def _supervisor_review_maybe_local_rewrite(
     *,
     live_supervisor: bool,
+    supervisor_local_rewrite: bool,
+    agent_profile: str,
+    system: str,
+    user_full: str,
     book_title: str,
     chapter_index: int,
     chapter_title: str,
@@ -111,11 +121,13 @@ def _live_supervisor_after_chapter(
     premise: str,
     chapter_plain: str,
     alog: dict[str, Any],
+    writing_temp: float,
     progress_cb: ProgressCb,
-) -> dict[str, Any] | None:
-    """逐章监督快审；返回可写入 live_supervisor 列表的一条记录。"""
+) -> tuple[str, dict[str, Any] | None]:
+    """在写盘前做监督快审；full+开启时，可按 issues 将正文回馈 Writer 做局部回写。返回 (可能已修订的 plain, 监督记录或 None)。"""
     if not live_supervisor:
-        return None
+        return chapter_plain, None
+    out_plain = chapter_plain
     try:
         live_rev = agent_supervisor_live_chapter_review(
             book_title=book_title,
@@ -127,6 +139,35 @@ def _live_supervisor_after_chapter(
             agent_chain_compact=compact_agent_log(alog),
         )
         entry: dict[str, Any] = {"chapter": chapter_index, "review": live_rev}
+        if (
+            supervisor_local_rewrite
+            and supervisor_local_rewrite_enabled()
+            and (agent_profile or "").lower() == "full"
+            and should_run_supervisor_local_revision(live_rev)
+        ):
+            if progress_cb:
+                progress_cb(
+                    {
+                        "event": "supervisor_local_revision_begin",
+                        "index": chapter_index,
+                        "title": chapter_title,
+                    }
+                )
+            try:
+                out_plain, rev_log = run_supervisor_local_rewrite(
+                    system=system,
+                    user_payload=user_full,
+                    chapter_plain=chapter_plain,
+                    review=live_rev,
+                    premise=premise,
+                    writing_temp=writing_temp,
+                )
+                entry["supervisor_local_revised"] = True
+                entry["local_revision_log"] = rev_log
+            except Exception as e:
+                logger.warning("supervisor local rewrite ch %s: %s", chapter_index, e)
+                entry["supervisor_local_rewrite_error"] = str(e)[:500]
+                out_plain = chapter_plain
         if progress_cb:
             progress_cb(
                 {
@@ -134,9 +175,10 @@ def _live_supervisor_after_chapter(
                     "index": chapter_index,
                     "title": chapter_title,
                     "review": live_rev,
+                    "supervisor_local_revised": bool(entry.get("supervisor_local_revised")),
                 }
             )
-        return entry
+        return out_plain, entry
     except Exception as e:
         logger.warning("live supervisor chapter %s failed: %s", chapter_index, e)
         err = str(e)[:500]
@@ -150,7 +192,7 @@ def _live_supervisor_after_chapter(
                     "error": err,
                 }
             )
-        return entry
+        return chapter_plain, entry
 
 
 def _final_supervisor_for_book(
@@ -404,6 +446,31 @@ def _batched_chapter_plan_slices(
     return all_ch
 
 
+# 模型常在与入库「## 章题」重复的位置再输出一行「第N章」/「第一章」；用正则只剥**整行**元信息，避免误伤叙事句。
+_CH_HEADING_LINE = re.compile(
+    r"^(?:#{1,6}\s*)?"
+    r"第\s*(?:[0-9０-９]{1,4}|[零〇一二三四五六七八九十百千两]+)\s*章"
+    r"(?:\s*[·•．.：:]\s*[^\n。！？!…]{0,48})?"
+    r"\s*$"
+)
+
+
+def strip_leading_chapter_index_noise(body: str) -> str:
+    """删去正文**开头**仅含「第N章/第一章」及可选 `·` 短题的行（可带 markdown #），不碰叙事正文。"""
+    t = (body or "").strip()
+    while t:
+        parts = t.split("\n", 1)
+        first = parts[0].strip()
+        if not first:
+            t = parts[1].lstrip("\n") if len(parts) > 1 else ""
+            continue
+        if _CH_HEADING_LINE.fullmatch(first):
+            t = parts[1].lstrip("\n") if len(parts) > 1 else ""
+            continue
+        break
+    return t
+
+
 def _heading_titles_equal(line_title: str, want: str) -> bool:
     """Loose match for model ## line vs planned chapter title (handles spacing / 第 N 章)."""
     a = re.sub(r"\s+", "", (line_title or "").strip())
@@ -454,7 +521,8 @@ def sanitize_chapter_body(body: str) -> str:
     out = "\n".join(lines_out).strip()
     out = strip_markdown_double_asterisk_bold(out)
     out = strip_aiwriter_prose_noise(out)
-    return relax_runon_cjk_prose_to_paragraphs(out)
+    out = relax_runon_cjk_prose_to_paragraphs(out)
+    return strip_leading_chapter_index_noise(out)
 
 
 def _chapter_body_plain_from_file(raw_md: str) -> str:
@@ -1728,6 +1796,7 @@ def run_pipeline_from_title(
     ideation_level: float = 0.5,
     user_book_note: Optional[str] = None,
     live_supervisor: bool = False,
+    supervisor_local_rewrite: bool = True,
     final_supervisor: bool = False,
     memory_episodic_keep_last: Optional[int] = None,
     foreshadowing_sync_after_chapter: bool = False,
@@ -2022,6 +2091,34 @@ def run_pipeline_from_title(
                 except OSError:
                     pass
         cleaned = strip_leading_duplicate_chapter_heading(cleaned, ch_title)
+        cleaned, ent = _supervisor_review_maybe_local_rewrite(
+            live_supervisor=live_supervisor,
+            supervisor_local_rewrite=supervisor_local_rewrite,
+            agent_profile=agent_profile,
+            system=system,
+            user_full=user_full,
+            book_title=book_title,
+            chapter_index=idx,
+            chapter_title=ch_title,
+            beat=str(ch.get("beat") or ""),
+            premise=premise,
+            chapter_plain=cleaned,
+            alog=alog,
+            writing_temp=writing_temp,
+            progress_cb=progress_cb,
+        )
+        if ent is not None:
+            live_supervisor_logs.append(ent)
+            try:
+                maybe_append_changelog_after_supervisor(
+                    book_path,
+                    length_scale=length_scale,
+                    chapter_index=idx,
+                    supervisor_entry=ent,
+                )
+            except Exception:
+                logger.debug("canon changelog append failed", exc_info=True)
+
         content = _chapter_heading(ch_title, idx) + cleaned + "\n"
         write_chapter(root, book_id, idx, content)
         saved.append(str(book_path / "chapters" / f"{idx:02d}.md"))
@@ -2048,29 +2145,6 @@ def run_pipeline_from_title(
                     "total": len(chapters),
                 }
             )
-
-        ent = _live_supervisor_after_chapter(
-            live_supervisor=live_supervisor,
-            book_title=book_title,
-            chapter_index=idx,
-            chapter_title=ch_title,
-            beat=str(ch.get("beat") or ""),
-            premise=premise,
-            chapter_plain=cleaned,
-            alog=alog,
-            progress_cb=progress_cb,
-        )
-        if ent is not None:
-            live_supervisor_logs.append(ent)
-            try:
-                maybe_append_changelog_after_supervisor(
-                    book_path,
-                    length_scale=length_scale,
-                    chapter_index=idx,
-                    supervisor_entry=ent,
-                )
-            except Exception:
-                logger.debug("canon changelog append failed", exc_info=True)
 
         snippet = cleaned.replace("\n", " ")[:320]
         orch = orchestrator_bump_state(orch, step="chapter_draft", chapter=idx)
@@ -2213,6 +2287,7 @@ def run_rewrite_chapter(
     run_reader_driven_revision: bool = True,
     ideation_level: Optional[float] = None,
     live_supervisor: bool = False,
+    supervisor_local_rewrite: bool = True,
     progress_cb: ProgressCb = None,
     theme_id: Optional[str] = None,
     rewrite_author_note: Optional[str] = None,
@@ -2404,6 +2479,22 @@ def run_rewrite_chapter(
             except OSError:
                 pass
     cleaned = strip_leading_duplicate_chapter_heading(cleaned, ch_title)
+    cleaned, _ent_sup = _supervisor_review_maybe_local_rewrite(
+        live_supervisor=live_supervisor,
+        supervisor_local_rewrite=supervisor_local_rewrite,
+        agent_profile=agent_profile,
+        system=system,
+        user_full=user_full,
+        book_title=book_title,
+        chapter_index=idx,
+        chapter_title=ch_title,
+        beat=str(ch_row.get("beat") or ""),
+        premise=premise,
+        chapter_plain=cleaned,
+        alog=alog,
+        writing_temp=writing_temp,
+        progress_cb=progress_cb,
+    )
     content = _chapter_heading(ch_title, idx) + cleaned + "\n"
     write_chapter(root, book_id, idx, content)
     try:
@@ -2426,18 +2517,6 @@ def run_rewrite_chapter(
         progress_cb=progress_cb,
     )
 
-    _live_supervisor_after_chapter(
-        live_supervisor=live_supervisor,
-        book_title=book_title,
-        chapter_index=idx,
-        chapter_title=ch_title,
-        beat=str(ch_row.get("beat") or ""),
-        premise=premise,
-        chapter_plain=cleaned,
-        alog=alog,
-        progress_cb=progress_cb,
-    )
-
     orch = read_orchestration_state(root, book_id)
     orch = orchestrator_bump_state(orch, step="chapter_rewrite", chapter=idx)
     write_orchestration_state(root, book_id, orch)
@@ -2454,7 +2533,7 @@ def run_rewrite_chapter(
             }
         )
 
-    return {
+    out_rw: dict[str, Any] = {
         "book_id": book_id,
         "book_title": book_title,
         "chapter_index": idx,
@@ -2462,6 +2541,9 @@ def run_rewrite_chapter(
         "saved_file": str(book_path / "chapters" / f"{idx:02d}.md"),
         "agent_log": alog,
     }
+    if _ent_sup is not None:
+        out_rw["live_supervisor"] = [_ent_sup]
+    return out_rw
 
 
 def run_continue_next_chapter(
@@ -2480,6 +2562,7 @@ def run_continue_next_chapter(
     run_reader_driven_revision: bool = True,
     ideation_level: Optional[float] = None,
     live_supervisor: bool = False,
+    supervisor_local_rewrite: bool = True,
     final_supervisor: bool = False,
     progress_cb: ProgressCb = None,
     memory_episodic_keep_last: Optional[int] = None,
@@ -2680,6 +2763,33 @@ def run_continue_next_chapter(
     except OSError:
         pass
     cleaned = strip_leading_duplicate_chapter_heading(cleaned, title_next)
+    cleaned, ent = _supervisor_review_maybe_local_rewrite(
+        live_supervisor=live_supervisor,
+        supervisor_local_rewrite=supervisor_local_rewrite,
+        agent_profile=agent_profile,
+        system=system,
+        user_full=user_full,
+        book_title=book_title,
+        chapter_index=next_n,
+        chapter_title=title_next,
+        beat=beat_next,
+        premise=premise,
+        chapter_plain=cleaned,
+        alog=alog,
+        writing_temp=writing_temp,
+        progress_cb=progress_cb,
+    )
+    if ent is not None:
+        try:
+            maybe_append_changelog_after_supervisor(
+                book_path,
+                length_scale=length_scale_cont,
+                chapter_index=next_n,
+                supervisor_entry=ent,
+            )
+        except Exception:
+            logger.debug("canon changelog append failed", exc_info=True)
+
     content = _chapter_heading(title_next, next_n) + cleaned + "\n"
     write_chapter(root, book_id, next_n, content)
     try:
@@ -2723,28 +2833,6 @@ def run_continue_next_chapter(
         chapter=next_n,
     )
     write_orchestration_state(root, book_id, orch)
-
-    ent = _live_supervisor_after_chapter(
-        live_supervisor=live_supervisor,
-        book_title=book_title,
-        chapter_index=next_n,
-        chapter_title=title_next,
-        beat=beat_next,
-        premise=premise,
-        chapter_plain=cleaned,
-        alog=alog,
-        progress_cb=progress_cb,
-    )
-    if ent is not None:
-        try:
-            maybe_append_changelog_after_supervisor(
-                book_path,
-                length_scale=length_scale_cont,
-                chapter_index=next_n,
-                supervisor_entry=ent,
-            )
-        except Exception:
-            logger.debug("canon changelog append failed", exc_info=True)
 
     if sync_book_memory:
         snippet = cleaned.replace("\n", " ")[:320]
@@ -2855,6 +2943,7 @@ def run_continue_chapters(
     progress_cb: ProgressCb = None,
     ideation_level: Optional[float] = None,
     live_supervisor: bool = False,
+    supervisor_local_rewrite: bool = True,
     final_supervisor: bool = False,
     continuation_arc_plan: bool = True,
     memory_episodic_keep_last: Optional[int] = 48,
@@ -2924,6 +3013,7 @@ def run_continue_chapters(
             run_reader_driven_revision=run_reader_driven_revision,
             ideation_level=ideation_level,
             live_supervisor=live_supervisor,
+            supervisor_local_rewrite=supervisor_local_rewrite,
             final_supervisor=False,
             progress_cb=progress_cb,
             memory_episodic_keep_last=memory_episodic_keep_last,
