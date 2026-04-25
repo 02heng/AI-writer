@@ -13,6 +13,7 @@ from app.memory_store import (
     init_db,
     list_entries,
     list_entries_for_chapter_range,
+    max_numeric_chapter_label,
     read_rollup,
     write_rollup,
 )
@@ -164,3 +165,37 @@ class TestMemoryStore:
         r2 = list_entries_for_chapter_range(temp_data_dir, 1, 1, limit=50)
         assert len(r2) == 1
         assert r2[0]["chapter_label"] == "1"
+
+    def test_max_numeric_chapter_label(self, temp_data_dir: Path) -> None:
+        init_db(temp_data_dir)
+        assert max_numeric_chapter_label(temp_data_dir) == 0
+        add_entry(
+            temp_data_dir,
+            room="情节",
+            title="t",
+            body="x",
+            chapter_label="3",
+        )
+        assert max_numeric_chapter_label(temp_data_dir) == 3
+
+    def test_build_memory_context_linear_window(self, temp_data_dir: Path) -> None:
+        init_db(temp_data_dir)
+        add_entry(
+            temp_data_dir,
+            room="情节",
+            title="b2",
+            body="second-ch",
+            chapter_label="2",
+        )
+        add_entry(
+            temp_data_dir,
+            room="情节",
+            title="a1",
+            body="first-ch",
+            chapter_label="1",
+        )
+        ctx = build_memory_context(
+            temp_data_dir, max_chars=4000, linear_chapter_window=10
+        )
+        assert "近期各章线序" in ctx
+        assert ctx.index("first-ch") < ctx.index("second-ch")

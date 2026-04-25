@@ -61,7 +61,7 @@ def init_db(root: Path) -> None:
             "- `kb/` 已有设定：此处只写**指针**（如「详见 kb/某某」），避免重复粘贴长文。\n"
             "- 已收尾且无后患的情节：一行标注「某线已闭合」即可。\n\n"
             "## 与近期条目的分工\n\n"
-            "- **总摘要**：全书级压缩——主线阶段、人物当前立场、开放伏笔清单、大时间线。\n"
+            "- **总摘要**：全书级压缩；流水线会为**每章**追加**极简智能摘要**（概括句，**不**贴原文；**章末收束点**短写清，利接笔）。\n"
             "- **近期条目**：按「房间」存放单条事实、伏笔、人物卡片段；尽量填写「关联章节」便于溯源。\n",
             encoding="utf-8",
         )
@@ -120,6 +120,25 @@ def list_entries_for_chapter_range(
         return [_row_to_dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
+
+
+def max_numeric_chapter_label(root: Path) -> int:
+    """记忆条目中 chapter_label 为纯数字时的最大章号；无则 0。"""
+    init_db(root)
+    conn = sqlite3.connect(db_path(root))
+    try:
+        cur = conn.execute(
+            "SELECT MAX(CAST(chapter_label AS INTEGER)) FROM memory_entries "
+            "WHERE chapter_label GLOB '[0-9]*'"
+        )
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            return int(row[0])
+    except (TypeError, ValueError):
+        pass
+    finally:
+        conn.close()
+    return 0
 
 
 def add_entry(
@@ -210,11 +229,15 @@ def build_memory_context(
     semantic_query: Optional[str] = None,
     fetch_pool: int = 360,
     inject_foreshadowing: bool = True,
+    linear_chapter_window: Optional[int] = None,
 ) -> str:
     """拼接总摘要 + 近期条目，供注入 user 侧上下文。
 
     当设置环境变量 AIWRITER_MEMORY_SEMANTIC=1（默认开启）且传入 semantic_query 时，
     从较多条目中按与 query 的字符重叠得分排序后取预算内条目，减轻「上千条只取时间最近」的噪声。
+
+    若 ``linear_chapter_window`` 为正整数（本书流水线默认使用）：**忽略**语义粗排，改为按**章号升序**
+    拉取最近若干章内的记忆条目（线性时间线），标题为「近期各章线序」。
     """
     init_db(root)
     parts: list[str] = []
@@ -227,14 +250,35 @@ def build_memory_context(
         if hook_blk.strip():
             parts.append(hook_blk)
 
-    use_sem = bool(semantic_query and semantic_query.strip() and semantic_memory_enabled())
-    entry_limit = fetch_pool if use_sem else 40
-    entries = list_entries(root, limit=entry_limit)
-    if use_sem:
-        entries = rank_memory_entries(entries, semantic_query.strip())
-        section_title = "【记忆宫殿 · 与当前任务相关条目（语义粗排）】"
+    use_linear = linear_chapter_window is not None and int(linear_chapter_window) > 0
+    use_sem = (
+        not use_linear
+        and bool(semantic_query and semantic_query.strip() and semantic_memory_enabled())
+    )
+    entries: list[dict[str, Any]] = []
+    section_title = ""
+
+    if use_linear:
+        win = max(1, min(int(linear_chapter_window), 500))
+        hi = max_numeric_chapter_label(root)
+        if hi >= 1:
+            lo = max(1, hi - win + 1)
+            entries = list_entries_for_chapter_range(root, lo, hi, limit=500)
+            section_title = (
+                f"【记忆宫殿 · 近期各章线序（约第 {lo}–{hi} 章内条目，章号小→大）】"
+            )
+        else:
+            section_title = "【记忆宫殿 · 近期各章线序（尚无带章号条目，回退为时间新→旧）】"
+            entries = list_entries(root, limit=40)
     else:
-        section_title = "【记忆宫殿 · 近期条目（抽屉层，新→旧）】"
+        entry_limit = fetch_pool if use_sem else 40
+        entries = list_entries(root, limit=entry_limit)
+        if use_sem:
+            entries = rank_memory_entries(entries, semantic_query.strip())
+            section_title = "【记忆宫殿 · 与当前任务相关条目（语义粗排）】"
+        else:
+            section_title = "【记忆宫殿 · 近期条目（抽屉层，新→旧）】"
+
     if entries:
         lines: list[str] = [section_title]
         budget = max_chars - sum(len(p) + 2 for p in parts)
@@ -242,7 +286,7 @@ def build_memory_context(
         for e in entries:
             block = (
                 f"- [{e['room']}] {e['title']}"
-                + (f"（{e['chapter_label']}）" if e.get("chapter_label") else "")
+                + (f"（第{e['chapter_label']}章）" if e.get("chapter_label") else "")
                 + f"\n  {e['body']}"
             )
             if used + len(block) > budget:

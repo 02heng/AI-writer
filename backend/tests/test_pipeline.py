@@ -124,6 +124,16 @@ class TestPipelineHelpers:
         assert "正文号与" in out
         assert "小节" in out
 
+    def test_sanitize_chapter_body_collapses_ascii_quote_linebreaks(self) -> None:
+        from app.pipeline import sanitize_chapter_body
+
+        assert "\n" not in sanitize_chapter_body('他说："\n快逃。\n"')
+        out2 = sanitize_chapter_body('第一段。\n\n"第二段对白。"')
+        assert "\n\n" in out2
+        assert '"第二段对白。"' in out2
+        out3 = sanitize_chapter_body('他道："\n第一句\n第二句。"')
+        assert out3.count("\n") == 0 or "第一句第二句" in out3.replace("\n", "")
+
     def test_sanitize_chapter_body_runon_adds_paragraphs(self) -> None:
         """单段一坨长文在足够长、句号足够多时粗分为多段（按句对）。"""
         from app.pipeline import sanitize_chapter_body

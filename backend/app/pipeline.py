@@ -36,6 +36,7 @@ from .llm import LLMTransportError, chat_completion
 from .long_context_tail import append_chapter_tail_snippet, load_chapter_tail_for_prompt, maybe_compress_chapter_tail
 from .memory_hooks import foreshadowing_open_hooks_block, sync_foreshadowing_after_chapter
 from .memory_wiki import (
+    WIKI_COMPILE_INTERVAL,
     long_novel_wiki_memory_instruction,
     maybe_append_changelog_after_supervisor,
     maybe_wiki_compile_episodic_batch,
@@ -65,10 +66,39 @@ from .orchestration.supervisor import (
 )
 from .scene_writer import generate_chapter_with_scenes
 from .layered_memory import build_context_for_chapter
+from .kb_synthesis import merge_writer_kb_block, refresh_author_bible_synthesis_after_chapter
 
 logger = get_logger(__name__)
 
 ProgressCb = Optional[Callable[[dict[str, Any]], None]]
+
+
+def _maybe_refresh_kb_synthesis(
+    book_path: Path,
+    *,
+    book_title: str,
+    premise: str,
+    chapter_index: int,
+    chapter_title: str,
+    chapter_plain: str,
+    sync_book_memory: bool,
+    progress_cb: ProgressCb = None,
+) -> None:
+    if not sync_book_memory:
+        return
+    try:
+        r = refresh_author_bible_synthesis_after_chapter(
+            book_path,
+            book_title=book_title,
+            premise=premise,
+            chapter_index=chapter_index,
+            chapter_title=chapter_title,
+            chapter_plain=chapter_plain,
+        )
+        if progress_cb and isinstance(r, dict) and r.get("ok"):
+            progress_cb({"event": "kb_synthesis", "chapter": chapter_index, "kb_synthesis": r})
+    except Exception as e:
+        logger.warning("kb_synthesis after ch %s: %s", chapter_index, e)
 
 
 def _live_supervisor_after_chapter(
@@ -175,6 +205,7 @@ PLAN_BATCH_SIZE = 20
 PLANNER_ORIGINALITY_CONTRACT = (
     "原创与节奏硬约束：全书与分章构思须独立原创，禁止对任何已有作品（出版读物、网文、影视等）进行情节复刻、名场面换皮、人设套壳或名句仿写；"
     "禁止依赖读者极易辨认的「经典桥段硬套、桥段堆砌」拼凑过关；策划与分章 beat 的正文措辞避免使用易被连载平台误判的字面词（见 Writer「平台正文用语规避」）。叙事须有清晰起伏：阶段与章级均应有冲突、阻碍、信息差或意外转折，避免流水账与平铺直叙。"
+    " **反平庸与吸引力**：分章 beat 忌只写「继续推进/关系加深/局势变化」等概括句而无**可执行的戏剧细节**；每章至少包含一处读者能复述的**具体钩子**（反常物件、非常选择、利害翻转、带刺对白、未兑现威胁、身份或信息差的一步揭露等），并与本书独有设定或人物执念挂钩，避免「题材常见但毫无辨识度」的温吞章纲。"
     " 若题材说明或题目体现网文爽文、言情、甜宠、逆袭、打脸等通俗叙事倾向：分章 beat 须写清冲突推进与章末悬念或留白；"
     "言情向须在梗概与分章要点中体现感情线阶段（吸引、试探、阻碍、确认或拉扯反复），避免连续多章复用同一套打脸或误会桥段。"
 )
@@ -406,7 +437,7 @@ def strip_leading_duplicate_chapter_heading(body: str, ch_title: str) -> str:
 
 
 def sanitize_chapter_body(body: str) -> str:
-    """Strip HTML comments, decorative lines, Markdown **bold**, line-leading > / list / # marks, and `,-` glitches."""
+    """Strip HTML comments, decorative lines, Markdown **bold**, line-leading > / list / # marks, `,-` glitches, and LLM hard wraps inside ASCII \" dialogue."""
     t = body.strip()
     t = re.sub(r"<!--[\s\S]*?-->", "", t)
     lines_out: list[str] = []
@@ -464,17 +495,26 @@ def _short_story_reader_engagement_instruction() -> str:
         "（2）爽点类型须轮换：同一章勿用同一种「爽」反复灌水；采用「小爽→略压或顿挫→更大爽」的微型波浪，整体节奏比中长篇更紧。"
         "（3）信息前置：读者追读的悬念或利害关系须在标题意象或首段可被感知，勿把核心钩子推迟到大量铺陈之后。"
         "（4）首次强情绪或信息反馈尽量前移，勿让读者划行过久才得到 payoff；可先给阶段性满足，再以伏笔拉长后文期待，勿倒置。"
-        "（5）**第1章与第2章（全书短篇）**：两章**各自**须在开篇**一至三段或约二百汉字内**让读者明确感到「爽」或「虐」的强体感（与梗概主调一致，可一章偏爽一章偏虐或同调递进，但不得两章开头都温吞）；"
-        "爽——利害翻盘、打脸、逆袭、尊严回击、希望陡升等可感回报；虐——委屈、失去、关系撕裂、抉择刺痛、绝望一沉等情绪直给，须**瞬间抓眼**，禁止慢热纯铺垫或散文感喟单独撑起开篇。"
+        "（5）**第1章与第2章（全书短篇）**：两章**各自**须在开篇**一至三段或约二百汉字内**抓住读者，**不得两章开头都温吞**。"
+        "**悬疑/惊悚题材**（用户提示含【短篇·悬疑/惊悚专规】时）：以**悬疑感拉满**为首要，须让读者立刻感到不对劲、有隐情或威胁迫近，细节见该专规。"
+        "**其他题材**：须让读者明确感到「爽」或「虐」的强体感（与梗概主调一致，可一章偏爽一章偏虐或同调递进）；"
+        "爽——利害翻盘、打脸、逆袭、尊严回击、希望陡升等；虐——委屈、失去、关系撕裂、抉择刺痛、绝望一沉等，须**瞬间抓眼**，禁止慢热纯铺垫或散文感喟单独撑起开篇。"
     )
 
 
 # 与 `data/themes.json` 中言情向 id 对齐；短篇 + 其中任一时注入「网文体言情专规」。
 SHORT_STORY_ROMANCE_THEME_IDS = frozenset({"romance", "ancient_romance"})
 
+# `themes.json` 中「悬疑 / 惊悚」的 id 为 horror。
+SHORT_STORY_SUSPENSE_THEME_IDS = frozenset({"horror"})
+
 
 def theme_id_is_romance(theme_id: Optional[str]) -> bool:
     return (theme_id or "").strip().lower() in SHORT_STORY_ROMANCE_THEME_IDS
+
+
+def theme_id_is_suspense_horror(theme_id: Optional[str]) -> bool:
+    return (theme_id or "").strip().lower() in SHORT_STORY_SUSPENSE_THEME_IDS
 
 
 def _short_story_romance_web_instruction() -> str:
@@ -489,6 +529,18 @@ def _short_story_romance_web_instruction() -> str:
         "甜——障碍小而具体、可翻篇；高糖靠互动细节与潜台词，少用套路表白堆砌。"
         "爽——憋屈有度、翻盘有声；打脸/追妻须有场面与因果，反派忌全员降智。"
         "若并行悬疑：主线仅保留一条主谜团，真相须对前文公平（线索可回看拼合）。"
+    )
+
+
+def _short_story_suspense_reader_instruction() -> str:
+    """短篇 + 悬疑/惊悚题材：首两章开篇强悬念（与策划、正文合同共用）。"""
+    return (
+        "【短篇·悬疑/惊悚专规】（须与【短篇读者节奏】一并遵守；节奏（5）以本条为悬疑向执行细则）"
+        "**第1章与第2章各自**须在开篇**一至三段或约二百汉字内**把**悬疑感拉满**：让读者立刻感到「不对劲、有隐情、危险迫近或真相被盖住」——"
+        "须用**可演的具体反常**落地（错位的物件、对不上的时间、记忆裂口、一句露馅的谎、不该出现的人或足迹、规则被悄悄打破等），"
+        "**禁止**仅靠「诡异」「不安」「隐隐觉得」等形容词空转而事件尚未推进。"
+        "两章分工：**禁止**两章都以纯日常、纯氛围散文起笔再把悬念推迟；须至少一章抛出强钩子或认知颠簸，另一章**升级威胁、收窄可能性或揭开一层假面**（仍留主谜团）。"
+        "线索对读者须**公平**：主要谜团宜一条为主，伏笔可回看拼合，**禁止**结尾机械降神；解释或留白须与前文统一。"
     )
 
 
@@ -513,6 +565,16 @@ def _maybe_append_short_story_romance_writer(
         parts.append(_short_story_romance_web_instruction())
 
 
+def _maybe_append_short_story_suspense_writer(
+    parts: list[str],
+    *,
+    length_scale: str,
+    theme_id: Optional[str],
+) -> None:
+    if length_scale == "short" and theme_id_is_suspense_horror(theme_id):
+        parts.append(_short_story_suspense_reader_instruction())
+
+
 def _scale_instruction(length_scale: str, theme_id: Optional[str] = None) -> str:
     m = {
         "short": "篇幅为短篇：结构紧凑，单线或极少支线，冲突推进快，适合约三万至八万汉字量级的叙事节奏，避免冗长支线。",
@@ -524,6 +586,8 @@ def _scale_instruction(length_scale: str, theme_id: Optional[str] = None) -> str
         base = base + "\n" + _short_story_reader_engagement_instruction()
         if theme_id_is_romance(theme_id):
             base = base + "\n" + _short_story_romance_web_instruction()
+        if theme_id_is_suspense_horror(theme_id):
+            base = base + "\n" + _short_story_suspense_reader_instruction()
         return base
     return base
 
@@ -710,22 +774,40 @@ def _format_chapter_contract(
     if ls == "short":
         short_struct = (
             "【结构提示·短篇】除须满足上文【短篇读者节奏】外：开场即陷入可感冲突或悬念；"
-            "中段维持微型波浪；结尾仍须情绪落点或悬念，避免「总之/后来」式收尾。"
+            "中段维持微型波浪；结尾仍须情绪落点或悬念，避免「总之/后来」式收尾；"
+            "全章与邻章衔接的因果/时序/空间/现实**物理与常识**须清晰可推（题材特许者须在规则内自洽）。"
         )
         if idx in (1, 2):
-            short_struct += (
-                f"**本章为第 {idx} 章**：须落实节奏（5）——开篇极短篇幅内给到明确的爽感或虐感，瞬间吸引读者，勿寡淡起笔。"
-            )
+            if theme_id_is_suspense_horror(theme_id):
+                short_struct += (
+                    f"**本章为第 {idx} 章（短篇悬疑）**：须落实【短篇·悬疑/惊悚专规】——开篇极短篇幅内**悬疑感拉满**，勿寡淡起笔。"
+                )
+            else:
+                short_struct += (
+                    f"**本章为第 {idx} 章**：须落实节奏（5）——开篇极短篇幅内给到明确的爽感或虐感，瞬间吸引读者，勿寡淡起笔。"
+                )
         lines.append(short_struct)
         if theme_id_is_romance(theme_id):
             lines.append(
                 "【结构提示·短篇言情】全书按网文体短篇言情执行：段落宜短、章末有钩子或情绪落点；"
                 "若梗概已写明虐/甜/爽主调须贯穿，勿改调；详见用户提示中的【短篇·网文体·言情专规】。"
             )
+        if theme_id_is_suspense_horror(theme_id):
+            lines.append(
+                "【结构提示·短篇悬疑】须落实用户提示中的【短篇·悬疑/惊悚专规】：**第1、2章**开篇须把悬疑感拉满，"
+                "以具体反常或信息差落地；后续章递进谜团或威胁，线索对读者公平。"
+            )
     else:
         lines.append(
-            "【结构提示】开场尽快入戏；中段推进冲突或信息；结尾留情绪落点或悬念，避免「总之/后来」式收尾。"
+            "【结构提示】开场尽快入戏；中段推进冲突或信息；结尾留情绪落点或悬念，避免「总之/后来」式收尾；"
+            "章内与承上之处的**因果、时序、动线**须可推；**现实世界**的位移、体力、视听觉范围、物具去留、通讯/交通的合理滞后等**物理与常识**须自洽、禁无交代硬跳；玄幻科幻等以梗概/合同之规则为界并前后一致。"
         )
+        if idx == 1:
+            lines.append(
+                "【第1章 · 开篇铁律与作者圣经】正文开头约**前三百个汉字**（含标点）内须出现可辨识的主角与可感知的冲突；"
+                "禁止世界观/设定说明书式开篇，禁止以纯环境、天气、风物或无关空镜起笔；主角行为须有动机，性格与梗概一致。"
+                f"本书若使用 `kb/` 作者圣经：宜从第 1 章起在 `kb/` 建立人物卡与硬设定页，并每约 {WIKI_COMPILE_INTERVAL} 章结合 `memory/palace_summary.md` 与情节萃取校对、增量修订。"
+            )
     lines.append(
         "【篇幅目标】本章完整正文约 **2000～4000 汉字**（含标点、对话与描写）。"
         "以叙事完整为先，可贴近区间上下沿；禁止清单体、作者按语、复述合同或重复铺垫注水凑字。"
@@ -1292,20 +1374,89 @@ def _plan_from_title(
     )
 
 
+def _split_chapter_head_tail_for_memory(chapter_plain: str) -> tuple[str, str]:
+    """拆全章为「前段/章末」：章末块供续接与总摘要优先使用。"""
+    t = (chapter_plain or "").strip()
+    if len(t) <= 2000:
+        return t, t
+    tail_n = min(3500, max(1500, len(t) // 3))
+    tail = t[-tail_n:]
+    head = t[: len(t) - len(tail)]
+    if len(head) > 12000:
+        head = head[:12000] + "…（中略）"
+    return head, tail
+
+
+def _llm_palace_chapter_summary(
+    chapter_idx: int,
+    chapter_title: str,
+    chapter_plain: str,
+    *,
+    temperature: float = 0.22,
+) -> str | None:
+    """单章总摘要：极短概括 + 极短章末收束点（利接笔，禁止贴原文）。"""
+    head, tail = _split_chapter_head_tail_for_memory(chapter_plain)
+    tail_in = tail[-1800:] if len(tail) > 1800 else tail
+    head_in = head[:6000] + ("…" if len(head) > 6000 else "")
+    sys_p = (
+        "你是小说编辑。为「单章」写一条放入记忆宫殿**总摘要**的**极简**说明，供规划与下一章接笔。"
+        "**严禁**复制、照抄、引用原文句子或对话；**禁止**把正文段落改头换面贴过来；只用你自己的**概括句**。\n"
+        "结构（可用小标题）：\n"
+        "1）**本章主线**：**2～3 句**压缩全章：谁做了什么、关键转折；\n"
+        "2）**章末收在哪**（**2～5 句**即可）：用一句话说清「结尾**实际写到的**收束点」——人物当下位置/状态、"
+        "未完动作或悬在哪句对话/哪个信息上，使续写知道**从哪接**；**不要**展开成场景散文，**不要**超过必要句数。\n"
+        "**全文总长**控制在约 **80～220 个汉字**（宁少勿多）。不评论文笔。"
+    )
+    user_p = (
+        f"第 {chapter_idx} 章"
+        + (f"「{chapter_title}」" if (chapter_title or "").strip() else "")
+        + "\n\n"
+        f"【供你理解，勿在输出中复述】章末附近：\n{tail_in}\n\n"
+        f"【供你理解，勿在输出中复述】前段与中段：\n{head_in}\n"
+    )
+    try:
+        out = chat_completion(system=sys_p, user=user_p, temperature=temperature).strip()
+    except Exception as e:
+        logger.warning("palace chapter summary LLM failed: %s", e)
+        return None
+    if not out or len(out) < 30:
+        return None
+    return out[:700].strip()
+
+
+def _rollup_fallback_excerpt(chapter_plain: str) -> str:
+    """LLM 失败时：一句极短说明 + 章末极短线索，避免大段复制正文。"""
+    t = (chapter_plain or "").strip().replace("\n", " ")
+    if len(t) < 80:
+        return "（摘要暂代）" + t[:200]
+    tail = t[-220:].strip()
+    if len(tail) > 200:
+        tail = tail[-200:]
+    return (
+        "（智能摘要不可用；下列为**章末机械截断**，非叙事摘要，请后续在界面中订正为短句概括。）\n"
+        f"**收束线索（约最后几十字）**：…{tail}"
+    )
+
+
 def _append_rollup_chapter_snippet(
     book_root: Path,
     book_title: str,
     idx: int,
-    snippet: str,
+    chapter_plain: str,
     *,
     chapter_title: str = "",
+    temperature: float = 0.3,
 ) -> None:
     cur = read_rollup(book_root).strip()
     head = f"第 {idx} 章「{chapter_title}」" if chapter_title else f"第 {idx} 章"
-    line = f"\n\n## {head}摘要（自动生成）\n{snippet.strip()[:900]}"
-    if "## 第" in cur and f"第 {idx} 章摘要" in cur:
-        write_rollup(book_root, cur)
+    if f"## 第 {idx} 章" in cur and "摘要（自动生成）" in cur:
         return
+    block = _llm_palace_chapter_summary(
+        idx, chapter_title or "", chapter_plain, temperature=temperature
+    )
+    if not block:
+        block = _rollup_fallback_excerpt(chapter_plain)
+    line = f"\n\n## {head}摘要（自动生成）\n{block}\n"
     write_rollup(book_root, (cur + line).strip() + "\n")
 
 
@@ -1317,15 +1468,20 @@ def _sync_book_memory_entries(
     *,
     chapter_title: str = "",
 ) -> None:
+    c = (chapter_text or "").strip()
+    h, tail = _split_chapter_head_tail_for_memory(c)
     sys_p = (
-        "你是小说编辑。请阅读章节正文，提取可供后续章节参考的长期记忆要点。"
-        "输出 5～8 条短句，每条一行，以「- 」开头；只写剧情/人物状态/伏笔/时间线，不要评论文笔。"
-        "不要重复原文句子。"
+        "你是小说编辑。从本章提取可供**后续与下一章**参考的长期记忆要点（抽屉条目）。\n"
+        "输出 5～8 条，每条一行，以「- 」开头；**每条不超过约 60 字**；只写剧情/人物状态/伏笔/时间线/未决威胁，"
+        "**禁止**复制原文句或整段对话，用概括短句。"
+        "其中**至少 4 条**须直接服务「紧接章末续写」：对应章末约**最后三分之一**里的人物位置、"
+        "未收束动作、悬念或新信息；其余条可概括较前段落。"
     )
+    user_body = f"【章末优先（接笔区，约 {len(tail)} 字）】\n{tail}\n\n【全章前段/中段供对照】\n{h[:12000]}\n"
     try:
         bullets = chat_completion(
             system=sys_p,
-            user=chapter_text[:12000],
+            user=user_body if len(c) > 400 else c[:12000],
             temperature=temperature,
         )
     except Exception:
@@ -1795,10 +1951,16 @@ def run_pipeline_from_title(
         sem_q = f"{premise[:900]}\n{contract}"
         mem_book = ""
         if use_long_memory:
-            mem_book = build_memory_context(book_path, max_chars=4200, semantic_query=sem_q)
+            mem_book = build_memory_context(
+                book_path,
+                max_chars=4200,
+                semantic_query=sem_q,
+                linear_chapter_window=32,
+            )
+        effective_kb = merge_writer_kb_block(book_path, kb_block)
         mem_parts: list[str] = []
-        if kb_block.strip():
-            mem_parts.append(kb_block.strip())
+        if effective_kb.strip():
+            mem_parts.append(effective_kb.strip())
         if use_long_memory:
             if mem_book.strip():
                 mem_parts.append(mem_book.strip())
@@ -1812,6 +1974,7 @@ def run_pipeline_from_title(
         if length_scale == "short":
             mem_parts.append(_short_story_reader_engagement_instruction())
             _maybe_append_short_story_romance_writer(mem_parts, length_scale=length_scale, theme_id=theme_tid)
+            _maybe_append_short_story_suspense_writer(mem_parts, length_scale=length_scale, theme_id=theme_tid)
         if length_scale == "long":
             cl = read_changelog_tail(book_path, max_chars=1200)
             if cl.strip():
@@ -1836,7 +1999,7 @@ def run_pipeline_from_title(
                 user_payload=user_full,
                 writing_temp=writing_temp,
                 premise=premise,
-                kb_block=kb_block,
+                kb_block=effective_kb,
                 agent_profile=agent_profile,
                 run_reader_test=run_reader_test,
                 run_reader_driven_revision=run_reader_driven_revision,
@@ -1915,7 +2078,7 @@ def run_pipeline_from_title(
 
         if sync_book_memory:
             _append_rollup_chapter_snippet(
-                book_path, book_title, idx, snippet, chapter_title=ch_title
+                book_path, book_title, idx, cleaned, chapter_title=ch_title
             )
             _sync_book_memory_entries(
                 book_path, str(idx), cleaned, temperature=0.38, chapter_title=ch_title
@@ -1957,7 +2120,7 @@ def run_pipeline_from_title(
             except Exception:
                 logger.debug("memory episodic prune failed", exc_info=True)
 
-        if length_scale == "long" and sync_book_memory and idx > 0 and idx % 50 == 0:
+        if length_scale == "long" and sync_book_memory and idx > 0 and idx % WIKI_COMPILE_INTERVAL == 0:
             try:
                 cr = maybe_wiki_compile_episodic_batch(
                     book_path,
@@ -1970,6 +2133,17 @@ def run_pipeline_from_title(
                     progress_cb({"event": "wiki_compile", "chapter": idx, "wiki_compile": cr})
             except Exception as e:
                 logger.warning("wiki compile at chapter %s: %s", idx, e)
+
+        _maybe_refresh_kb_synthesis(
+            book_path,
+            book_title=book_title,
+            premise=premise,
+            chapter_index=idx,
+            chapter_title=ch_title,
+            chapter_plain=cleaned,
+            sync_book_memory=bool(sync_book_memory),
+            progress_cb=progress_cb,
+        )
 
     supervisor_final: dict[str, Any] | None = None
     if final_supervisor:
@@ -2119,10 +2293,16 @@ def run_rewrite_chapter(
     sem_q = f"{premise[:900]}\n{contract}"
     mem_book = ""
     if use_long_memory:
-        mem_book = build_memory_context(book_path, max_chars=4200, semantic_query=sem_q)
+        mem_book = build_memory_context(
+            book_path,
+            max_chars=4200,
+            semantic_query=sem_q,
+            linear_chapter_window=32,
+        )
+    effective_kb = merge_writer_kb_block(book_path, kb_block)
     mem_parts: list[str] = []
-    if kb_block.strip():
-        mem_parts.append(kb_block.strip())
+    if effective_kb.strip():
+        mem_parts.append(effective_kb.strip())
     if use_long_memory:
         if mem_book.strip():
             mem_parts.append(mem_book.strip())
@@ -2140,6 +2320,9 @@ def run_rewrite_chapter(
     if length_scale == "short":
         mem_parts.append(_short_story_reader_engagement_instruction())
         _maybe_append_short_story_romance_writer(
+            mem_parts, length_scale=length_scale, theme_id=theme_resolved
+        )
+        _maybe_append_short_story_suspense_writer(
             mem_parts, length_scale=length_scale, theme_id=theme_resolved
         )
     if length_scale == "long":
@@ -2198,7 +2381,7 @@ def run_rewrite_chapter(
             user_payload=user_full,
             writing_temp=writing_temp,
             premise=premise,
-            kb_block=kb_block,
+            kb_block=effective_kb,
             agent_profile=agent_profile,
             run_reader_test=run_reader_test,
             run_reader_driven_revision=run_reader_driven_revision,
@@ -2231,6 +2414,17 @@ def run_rewrite_chapter(
         )
     except OSError:
         logger.debug("append_agent_orchestration_log failed", exc_info=True)
+
+    _maybe_refresh_kb_synthesis(
+        book_path,
+        book_title=book_title,
+        premise=premise,
+        chapter_index=idx,
+        chapter_title=ch_title,
+        chapter_plain=cleaned,
+        sync_book_memory=True,
+        progress_cb=progress_cb,
+    )
 
     _live_supervisor_after_chapter(
         live_supervisor=live_supervisor,
@@ -2409,10 +2603,16 @@ def run_continue_next_chapter(
     sem_q = f"{(premise or '')[:900]}\n{contract_block}\n{beat_next[:700]}"
     mem_book = ""
     if use_long_memory:
-        mem_book = build_memory_context(book_path, max_chars=4200, semantic_query=sem_q)
+        mem_book = build_memory_context(
+            book_path,
+            max_chars=4200,
+            semantic_query=sem_q,
+            linear_chapter_window=32,
+        )
+    effective_kb = merge_writer_kb_block(book_path, kb_block)
     parts: list[str] = []
-    if kb_block.strip():
-        parts.append(kb_block.strip())
+    if effective_kb.strip():
+        parts.append(effective_kb.strip())
     if use_long_memory:
         if mem_book.strip():
             parts.append(mem_book.strip())
@@ -2424,6 +2624,9 @@ def run_continue_next_chapter(
     if length_scale_cont == "short":
         parts.append(_short_story_reader_engagement_instruction())
         _maybe_append_short_story_romance_writer(
+            parts, length_scale=length_scale_cont, theme_id=theme_resolved
+        )
+        _maybe_append_short_story_suspense_writer(
             parts, length_scale=length_scale_cont, theme_id=theme_resolved
         )
     if length_scale_cont == "long":
@@ -2457,7 +2660,7 @@ def run_continue_next_chapter(
             user_payload=user_full,
             writing_temp=writing_temp,
             premise=premise,
-            kb_block=kb_block,
+            kb_block=effective_kb,
             agent_profile=agent_profile,
             run_reader_test=run_reader_test,
             run_reader_driven_revision=run_reader_driven_revision,
@@ -2546,7 +2749,7 @@ def run_continue_next_chapter(
     if sync_book_memory:
         snippet = cleaned.replace("\n", " ")[:320]
         _append_rollup_chapter_snippet(
-            book_path, book_title, next_n, snippet, chapter_title=title_next
+            book_path, book_title, next_n, cleaned, chapter_title=title_next
         )
         _sync_book_memory_entries(
             book_path, str(next_n), cleaned, temperature=0.38, chapter_title=title_next
@@ -2591,7 +2794,7 @@ def run_continue_next_chapter(
         except Exception:
             logger.debug("memory episodic prune failed", exc_info=True)
 
-    if length_scale_cont == "long" and sync_book_memory and next_n > 0 and next_n % 50 == 0:
+    if length_scale_cont == "long" and sync_book_memory and next_n > 0 and next_n % WIKI_COMPILE_INTERVAL == 0:
         try:
             cr = maybe_wiki_compile_episodic_batch(
                 book_path,
@@ -2604,6 +2807,17 @@ def run_continue_next_chapter(
                 progress_cb({"event": "wiki_compile", "chapter": next_n, "wiki_compile": cr})
         except Exception as e:
             logger.warning("wiki compile at chapter %s: %s", next_n, e)
+
+    _maybe_refresh_kb_synthesis(
+        book_path,
+        book_title=book_title,
+        premise=premise,
+        chapter_index=next_n,
+        chapter_title=title_next,
+        chapter_plain=cleaned,
+        sync_book_memory=bool(sync_book_memory),
+        progress_cb=progress_cb,
+    )
 
     out: dict[str, Any] = {
         "book_id": book_id,
@@ -2861,6 +3075,11 @@ def run_continue_next_chapter_legacy_out(
     if length_scale_legacy == "short":
         parts.append(_short_story_reader_engagement_instruction())
         _maybe_append_short_story_romance_writer(
+            parts,
+            length_scale=length_scale_legacy,
+            theme_id=str(theme_id or "general").strip().lower(),
+        )
+        _maybe_append_short_story_suspense_writer(
             parts,
             length_scale=length_scale_legacy,
             theme_id=str(theme_id or "general").strip().lower(),

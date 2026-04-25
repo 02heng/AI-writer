@@ -14,7 +14,7 @@ from .memory_store import add_entry, init_db, list_entries_for_chapter_range, re
 
 logger = get_logger(__name__)
 
-WIKI_COMPILE_INTERVAL = 50
+WIKI_COMPILE_INTERVAL = 20
 CHANGELOG_REL = Path("memory") / "canon_changelog.md"
 STATE_REL = Path("memory") / "wiki_compile_state.json"
 
@@ -67,11 +67,11 @@ def read_changelog_tail(book_root: Path, *, max_chars: int = 1200) -> str:
 def long_novel_wiki_memory_instruction() -> str:
     return (
         "【长篇 · 记忆宫殿与作者圣经（Wiki）】\n"
-        "1）在 `kb/` 维护作者圣经：可用模板 `author-bible-template.md` 自建人物卡、年表、规则等 Markdown 页，并用 `[标题](文件名.md)` 互链；"
-        "硬设定、易吃书条目优先写入 KB，正文只写情节。\n"
-        "2）记忆宫殿宜记「指针」（如「详见 kb/某某」）与本章增量伏笔；勿把长设定全文塞进宫殿以免检索噪声。\n"
-        "3）全书每约 50 章会自动把该段「情节·萃取」条目合并摘要写入 `memory/palace_summary.md`（衣柜层），并淘汰本段已合并的自动萃取记录。\n"
-        "4）若上下文含【设定变更 log】：为监督智能体根据章节审查追加的摘要，续写须与之兼容。\n"
+        "1）**作者圣经（KB）**：先注入本书 `books/<id>/kb/author-bible-synthesis.md`，为**结构化**总则（人物卡、年表、规则/世界观、伏笔等，对齐 `author-bible-template`），**不含**记忆宫殿抽屉条目；可再接用户勾选的 `UserData/kb/*.md`。\n"
+        "2）**记忆宫殿（后读）**：注入 `palace_summary` 与**按章号线序**的近期条目（约最近 32 章内、章号小→大），承载连载过程与逐章萃取；与总则冲突时以总则+梗概为准并宜人工校订。\n"
+        "3）每章成稿后流水线会按**仅本章正文+梗概+旧总则+模板**刷新总则（**不**把宫殿「最近条目」喂进总则生成，避免重复）。环境变量 `AIWRITER_SKIP_KB_SYNTHESIS=1` 可跳过自动总则刷新。\n"
+        "4）宫殿内仍宜用「指针」指回 `kb/`，勿把长设定全文堆进抽屉；每约 20 章合并情节萃取入 `palace_summary.md`。\n"
+        "5）若上下文含【设定变更 log】：为监督智能体根据章节审查追加的摘要，续写须与之兼容。\n"
     )
 
 
@@ -131,7 +131,7 @@ def maybe_wiki_compile_episodic_batch(
     temperature: float = 0.35,
 ) -> dict[str, Any]:
     """
-    在 milestone_chapter 为 50 的倍数且 >0 时，将本批 50 章内的「情节·萃取」合并进 palace_summary，并删除已合并的自动萃取行。
+    在 milestone_chapter 为 20 的倍数且 >0 时，将本批 20 章内的「情节·萃取」合并进 palace_summary，并删除已合并的自动萃取行。
     幂等：同一 milestone 不重复执行。
     """
     if milestone_chapter < WIKI_COMPILE_INTERVAL or milestone_chapter % WIKI_COMPILE_INTERVAL != 0:
@@ -184,7 +184,7 @@ def maybe_wiki_compile_episodic_batch(
     block = (
         f"\n\n---\n\n## 长篇节点合并（第 {lo}–{hi} 章 · 自动）\n\n"
         f"{merged}\n\n"
-        "_（本段由流水线每 50 章合并「情节·萃取」生成；请在 `kb/` 作者圣经中校对硬设定。）_\n"
+        f"_（本段由流水线每 {WIKI_COMPILE_INTERVAL} 章合并「情节·萃取」生成；请在 `kb/` 作者圣经中校对硬设定。）_\n"
     )
     write_rollup(book_root, (rollup + block).strip() if rollup else block.strip())
 
@@ -192,7 +192,7 @@ def maybe_wiki_compile_episodic_batch(
     add_entry(
         book_root,
         room="情节",
-        title=f"【50章编译】第 {lo}–{hi} 章已并入总摘要",
+        title=f"【{WIKI_COMPILE_INTERVAL}章编译】第 {lo}–{hi} 章已并入总摘要",
         body=f"已合并约 {len(entries)} 条萃取相关记录入 palace_summary，并清理本批自动萃取 {deleted} 条。",
         chapter_label=str(hi),
     )

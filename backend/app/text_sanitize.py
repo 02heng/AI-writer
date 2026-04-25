@@ -43,6 +43,35 @@ def strip_comma_hyphen_glitch(text: str) -> str:
     return re.sub(r",\s*-\s*", "，", text)
 
 
+def collapse_ascii_quote_linebreaks(text: str) -> str:
+    """
+    合并模型在 ASCII 双引号对话里多余的硬换行。
+
+    阅读器 md-lite 会把同一段落内的换行渲染成 <br/>；LLM 常在「："\n」或引号内断行，导致视觉上像「双引号处回车」。
+    """
+    t = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    t = re.sub(r'([：:，,])\s*\n\s*"', r'\1"', t)
+    t = re.sub(r'\n\s*([。！？…])\s*"\s*(?=\n|\Z)', r'\1"', t)
+    out: list[str] = []
+    i = 0
+    start = 0
+    in_quote = False
+    while i < len(t):
+        if t[i] == '"':
+            chunk = t[start:i]
+            if in_quote:
+                chunk = re.sub(r"\s*\n\s*", "", chunk)
+            out.append(chunk)
+            out.append('"')
+            in_quote = not in_quote
+            i += 1
+            start = i
+        else:
+            i += 1
+    out.append(t[start:])
+    return "".join(out)
+
+
 def relax_runon_cjk_prose_to_paragraphs(text: str) -> str:
     """
     将「几乎无换行的一整块长文」粗分为多段（按句对合并），不改动本就分段良好的正文。
@@ -77,7 +106,8 @@ def relax_runon_cjk_prose_to_paragraphs(text: str) -> str:
 def strip_aiwriter_prose_noise(text: str) -> str:
     """Strip Markdown line junk and `,-` glitches after ** removal (used on chapter bodies)."""
     t = strip_markdown_line_prefixes(text)
-    return strip_comma_hyphen_glitch(t)
+    t = strip_comma_hyphen_glitch(t)
+    return collapse_ascii_quote_linebreaks(t)
 
 
 def strip_common_prefix_with_previous_opening(

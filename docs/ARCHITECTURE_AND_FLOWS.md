@@ -67,7 +67,7 @@ flowchart LR
 |------|-----------|
 | 记忆条目与总摘要 | `memory_store.py` |
 | 伏笔块、语义检索开关等 | `memory_hooks.py`、`memory_relevance.py` |
-| 每约 50 章合并萃取 → 总摘要 | `memory_wiki.py`（`maybe_wiki_compile_episodic_batch`） |
+| 每约 20 章合并萃取 → 总摘要 | `memory_wiki.py`（`maybe_wiki_compile_episodic_batch`） |
 | 用户目录布局与默认 KB 拷贝 | `paths.py` → `ensure_layout` |
 
 ---
