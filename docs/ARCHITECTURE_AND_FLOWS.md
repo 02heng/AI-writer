@@ -87,7 +87,7 @@ flowchart TD
   H --> I{sync_book_memory?}
   I -->|是| J[总摘要片段 + SQLite 条目同步 / 伏笔等]
   I -->|否| K[仅文件]
-  J --> L{长篇且章号为 50 倍数?}
+  J --> L{长篇且章号为 WIKI_COMPILE_INTERVAL 倍数?}
   L -->|是| M[Wiki 编译：合并本段萃取进 palace_summary]
   L -->|否| N{还有下一章?}
   K --> N
@@ -103,7 +103,7 @@ flowchart TD
 
 - API 层为 `POST /api/pipeline/from-title`（前端「一键生成」对应该流程）。
 - **`planned_total_chapters`** 可与本轮实际生成章数不同：策划会按「全书尺度」留白，正文仍按本轮 `max_chapters` 写。
-- **长篇 `length_scale == "long"`** 且开启本书记忆时，每 **50** 章触发一次「Wiki 协作」侧的批量合并（见上节）。
+- **长篇 `length_scale == "long"`** 且开启本书记忆时，每 **`WIKI_COMPILE_INTERVAL`（默认 20）** 章触发一次「Wiki 协作」侧的批量合并（`maybe_wiki_compile_episodic_batch`，见 `memory_wiki.py`）。
 
 ---
 
@@ -121,7 +121,7 @@ flowchart TD
   X5 --> X7[拼上下文并走 Writer / 多智能体链]
   X6 --> X7
   X7 --> X8[写入 chapters/NN.md + 记忆同步]
-  X8 --> X9{long 且 next % 50 == 0?}
+  X8 --> X9{long 且 next % WIKI_COMPILE_INTERVAL == 0?}
   X9 -->|是| X10[maybe_wiki_compile_episodic_batch]
   X9 -->|否| X11[结束]
   X10 --> X11

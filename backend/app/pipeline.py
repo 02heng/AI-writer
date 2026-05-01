@@ -20,6 +20,7 @@ from .book_storage import (
     get_plan,
     get_toc,
     read_orchestration_state,
+    save_meta,
     update_plan,
     write_chapter,
     write_orchestration_state,
@@ -252,6 +253,18 @@ PLANNER_ORIGINALITY_CONTRACT = (
     "言情向须在梗概与分章要点中体现感情线阶段（吸引、试探、阻碍、确认或拉扯反复），避免连续多章复用同一套打脸或误会桥段。"
 )
 
+# 当策划/设定提示中已嵌入「用户全书项目说明」时 appended to planner system prompts。
+def _planner_user_note_supremacy_clause(context_bundle: str) -> str:
+    """声明用户全书说明优先于题材标签与模型自拟走向。"""
+    b = context_bundle or ""
+    if "【用户全书项目说明" not in b and "【用户全书说明】" not in b:
+        return ""
+    return (
+        " **用户意图优先**：上下文中若含「用户全书项目说明」或「用户全书说明」，其中已写明的世界观、主线走向、人物关系、叙事基调、类型取舍、禁忌与具体要素为**最高优先级**；"
+        "书名、梗概、阶段划分与各章 beat 须**与之相容并对其负责**，不得为迎合常见类型套路而擅自改换核心矛盾或主题基调；"
+        "题材说明、类型惯例或模型自拟的「更讨喜」走向与之冲突时，**一律以用户全书说明为准**。"
+    )
+
 
 def _format_macro_block(macro: dict[str, Any], *, chapters_this_run: int) -> str:
     """注入分章策划与正文：提醒总盘子与本批范围。"""
@@ -321,7 +334,7 @@ def _plan_macro_scale(
         f"每段 summary 80-220 字，写阶段目标与关键转折，禁止尾逗号。"
         f" ending_direction 写终局气质与主线落点（勿剧透细节），80-200 字。"
         f" 用户本轮只写第 1–{chapters_this_run} 章，前面若干阶段须为后文留白，禁止在首阶段内完结全书。"
-        f" {PLANNER_ORIGINALITY_CONTRACT}"
+        f" {PLANNER_ORIGINALITY_CONTRACT}{_planner_user_note_supremacy_clause(theme_hint)}"
     )
     user_p = (
         f"题目：{title.strip()}\n"
@@ -1003,6 +1016,7 @@ def plan_continuation_arc(
         '{"idx":int,"title":"6~14字章名","beat":"180~280字要点","space_for_later":"string","hook_end":"string"}'
         "]}\n"
         "chapters 长度必须等于要求的章数。"
+        f"{_planner_user_note_supremacy_clause(note_block + note_s)}"
     )
     user_p = (
         f"书名：{book_title}\n{budget_hint}\n"
@@ -1129,7 +1143,7 @@ def _plan_from_title_single(
             f" chapters 必须恰好 {n} 条，idx 从 1 到 {n} 连续无跳号。"
             "每章仅有 idx、title、beat 三个键；beat 为一段连续文字，场景+冲突+悬念，"
             "禁止在字符串值内换行；禁止英文双引号出现在字符串值中（用单引号或书名号代替）；禁止数组/对象尾逗号。"
-            f" {PLANNER_ORIGINALITY_CONTRACT}"
+            f" {PLANNER_ORIGINALITY_CONTRACT}{_planner_user_note_supremacy_clause(theme_hint)}"
         )
     else:
         sys_p = (
@@ -1151,7 +1165,7 @@ def _plan_from_title_single(
             "},...]}"
             f"严格要求：chapters 数组长度必须恰好等于 {n}，idx 从 1 到 {n} 连续无跳号；"
             "每章 beat 必填，其余可选字段能填尽量填以提升后文一致性；不要使用尾逗号。"
-            f" {PLANNER_ORIGINALITY_CONTRACT}"
+            f" {PLANNER_ORIGINALITY_CONTRACT}{_planner_user_note_supremacy_clause(theme_hint)}"
         )
     user_p = f"题目：{title.strip()}\n"
     user_p += f"总章数（必须严格遵守）：恰好 {n} 章。\n"
@@ -1206,7 +1220,7 @@ def _plan_book_meta(
         "你是中文小说总策划。只输出一个 JSON 对象，禁止 Markdown。"
         '{"book_title":"string","premise":"string 全书梗概 350-700 字"}'
         " 须合法 JSON：无尾逗号，字符串内勿换行。"
-        f" {PLANNER_ORIGINALITY_CONTRACT}"
+        f" {PLANNER_ORIGINALITY_CONTRACT}{_planner_user_note_supremacy_clause(theme_hint)}"
     )
     user_p = (
         f"题目：{title.strip()}\n"
@@ -1259,7 +1273,7 @@ def _plan_chapters_slice(
         '{"chapters":[{"idx":int,"title":"4-12字","beat":"70-130字"},...]}'
         f" chapters 必须恰好 {k} 条，idx 从 {start_idx} 到 {end_idx} 每条唯一且连续。"
         "仅允许 idx、title、beat 三键；beat 为一段无换行文字；禁止尾逗号与 Markdown。"
-        f" {PLANNER_ORIGINALITY_CONTRACT}"
+        f" {PLANNER_ORIGINALITY_CONTRACT}{_planner_user_note_supremacy_clause(theme_hint)}"
     )
     user_p = (
         f"原始题目：{title.strip()}\n书名：{book_title}\n【全书梗概】\n{premise}\n"
@@ -1638,6 +1652,8 @@ def _seed_series_canon_memory(
 ) -> None:
     """开笔前：世界观/人物/伏笔/时间线写入本书记忆宫殿与条目（与长期记忆约定一致）。"""
     compact = _compact_outline_for_canon(chapters, n_target)
+    _canon_note_bundle = f"{theme_hint or ''}\n{extra_voice_context or ''}"
+    _sup_note = _planner_user_note_supremacy_clause(_canon_note_bundle)
     sys_p = (
         "你是长篇小说设定总监。根据书名、梗概与分章缩略，整理四类「长程写作约束」，"
         "后续数百章须遵守以防吃书。只输出一个 JSON 对象，禁止 Markdown 围栏。"
@@ -1648,6 +1664,7 @@ def _seed_series_canon_memory(
         "open_loops：尚未收回的伏笔与承诺，谁承诺了什么、双关、物件未解释等，附状态如未解释或预计第N章收回。"
         "timeline_irreversible：生死、叛变、大战结果、关键日期地点等不可逆事实，年表式短句。"
         "信息不足可写「待正文补充」；字符串内禁止未转义英文双引号；禁止尾逗号。"
+        f"{_sup_note}"
     )
     plan_note = f"计划总章数：{n_target}"
     if isinstance(macro_outline, dict) and macro_outline.get("planned_total_chapters") is not None:
@@ -1801,12 +1818,14 @@ def run_pipeline_from_title(
     memory_episodic_keep_last: Optional[int] = None,
     foreshadowing_sync_after_chapter: bool = False,
     theme_id: Optional[str] = None,
+    distilled_author_card: Optional[str] = None,
 ) -> dict[str, Any]:
     """策划 → 逐章写作 → 写入 books/{book_id}/。
     
     Args:
         use_scene_generation: If True, use scene-level generation for better
             long-text quality. Each chapter is split into scenes before writing.
+        distilled_author_card: 若提供，使用蒸馏作者卡片替代随机生成虚拟作者。
     """
     theme_tid = str(theme_id or "general").strip().lower()
     theme_hint = (theme_addon or "").strip()
@@ -1884,20 +1903,32 @@ def run_pipeline_from_title(
         )
 
     planned_stored = planned_opt if planned_opt is not None else n_target
-    author_roll = roll_virtual_author()
-    author_meta: dict[str, Any] = {
-        "gender": author_roll["gender"],
-        "pronoun": author_roll["pronoun"],
-        "age": author_roll["age"],
-        "city": author_roll["city"],
-        "profession": author_roll["profession"],
-        "card": author_roll["card"],
-    }
+    # 蒸馏作者 > 随机虚拟作者
+    if distilled_author_card and distilled_author_card.strip():
+        author_meta: dict[str, Any] = {
+            "gender": "未知",
+            "pronoun": "其",
+            "age": 0,
+            "city": "",
+            "profession": "蒸馏作者",
+            "card": distilled_author_card.strip()[:6000],
+            "source": "distilled",
+        }
+    else:
+        author_roll = roll_virtual_author()
+        author_meta: dict[str, Any] = {
+            "gender": author_roll["gender"],
+            "pronoun": author_roll["pronoun"],
+            "age": author_roll["age"],
+            "city": author_roll["city"],
+            "profession": author_roll["profession"],
+            "card": author_roll["card"],
+        }
     canon_voice = ""
     if note_s:
         canon_voice += f"【用户全书项目说明】\n{note_s[:2000]}\n\n"
     canon_voice += (
-        f"【本书虚拟作者（人物欲望与叙事重心须与此人格滤光一致）】\n{str(author_roll.get('card') or '')[:2800]}\n"
+        f"【本书虚拟作者（人物欲望与叙事重心须与此人格滤光一致）】\n{str(author_meta.get('card') or '')[:2800]}\n"
     )
 
     meta_plan: dict[str, Any] = {
@@ -2082,6 +2113,11 @@ def run_pipeline_from_title(
             raise HTTPException(502, f"第 {idx} 章生成失败: {e}") from e
 
         cleaned = sanitize_chapter_body(body)
+        if not cleaned.strip() or len(cleaned.strip()) < 100:
+            raise HTTPException(
+                502,
+                f"第 {idx} 章生成后正文过少（{len(cleaned.strip())} 字），已阻止写入。请重试。"
+            )
         if idx > 1:
             prev_path = book_path / "chapters" / f"{idx - 1:02d}.md"
             if prev_path.is_file():
@@ -2267,7 +2303,9 @@ def _rewrite_author_note_instruction(note: str) -> str:
     return (
         "【本章重写 · 作者补充意图】\n"
         f"{s[:6000]}\n"
-        "须在遵守全书梗概、本章写作合同与 KB/记忆宫殿既定事实的前提下落实；若与合同或设定冲突，以梗概与合同为准，并在可自洽范围内向上述意图靠拢。\n"
+        "须在遵守全书梗概、本章写作合同与 KB/记忆宫殿既定事实的前提下落实；"
+        "若与本书已注入的【用户全书项目说明】方向一致，优先满足用户说明与本节补充的共同意图。"
+        "若与合同或硬性设定冲突，以梗概与合同为准，并在可自洽范围内向上述意图靠拢。\n"
     )
 
 
@@ -2288,9 +2326,13 @@ def run_rewrite_chapter(
     ideation_level: Optional[float] = None,
     live_supervisor: bool = False,
     supervisor_local_rewrite: bool = True,
+    final_supervisor: bool = False,
     progress_cb: ProgressCb = None,
+    memory_episodic_keep_last: Optional[int] = None,
+    foreshadowing_sync_after_chapter: bool = False,
     theme_id: Optional[str] = None,
     rewrite_author_note: Optional[str] = None,
+    distilled_author_card: Optional[str] = None,
 ) -> dict[str, Any]:
     """按既有 plan 要点（无则兜底）重新生成并覆盖某一章；chapter_index 为 None 时重写当前最后一章。"""
     book_path = book_dir(root, book_id)
@@ -2364,7 +2406,25 @@ def run_rewrite_chapter(
     if theme_addon.strip():
         system = f"{system}\n\n【题材约束】\n{theme_addon.strip()}"
 
-    voice_block = format_voice_from_book_meta(get_meta(root, book_id))
+    # 蒸馏作者覆盖 > 书本原虚拟作者
+    if distilled_author_card and distilled_author_card.strip():
+        _distilled_va = {"card": distilled_author_card.strip(), "profession": "蒸馏作者", "source": "distilled"}
+        voice_block = build_voice_prompt_blocks(user_book_note=None, author=_distilled_va)
+        # 同步覆写 meta.json 与 plan.json 中的虚拟作者
+        try:
+            meta_cur = get_meta(root, book_id)
+            meta_cur["virtual_author"] = _distilled_va
+            save_meta(root, book_id, meta_cur)
+        except Exception:
+            pass
+        try:
+            if isinstance(plan_data.get("meta"), dict):
+                plan_data["meta"]["virtual_author"] = _distilled_va
+                update_plan(root, book_id, plan_data)
+        except Exception:
+            pass
+    else:
+        voice_block = format_voice_from_book_meta(get_meta(root, book_id))
     sem_q = f"{premise[:900]}\n{contract}"
     mem_book = ""
     if use_long_memory:
@@ -2430,6 +2490,40 @@ def run_rewrite_chapter(
                     f"【上一章正文】第 {idx - 1} 章\n{prev_for_ctx}\n"
                     f"{_rewrite_chapter_bridge_instruction(idx - 1, idx)}"
                 )
+    # 注入下一章开头内容，确保重写本章时能与后文衔接
+    next_p = book_path / "chapters" / f"{idx + 1:02d}.md"
+    if next_p.is_file():
+        try:
+            next_text = next_p.read_text(encoding="utf-8")
+        except OSError:
+            next_text = ""
+        if next_text.strip().startswith("<!--"):
+            close_n = next_text.find("-->")
+            if close_n != -1:
+                next_text = next_text[close_n + 3 :].lstrip()
+        next_for_ctx = next_text.strip()
+        if len(next_for_ctx) > 6000:
+            next_for_ctx = next_for_ctx[:6000]
+        if next_for_ctx:
+            # 获取下一章标题
+            next_title = ""
+            try:
+                next_toc = get_toc(root, book_id)
+                for _row in next_toc:
+                    if int(_row["n"]) == idx + 1:
+                        next_title = str(_row.get("title") or "")
+                        break
+            except Exception:
+                pass
+            mem_parts.append(
+                f"【下一章正文】第 {idx + 1} 章{f'「{next_title}」' if next_title else ''}（开头）\n"
+                f"{next_for_ctx}\n"
+                "【重写·与后文衔接·强制】\n"
+                f"你正在重写第 {idx} 章。下方已提供第 {idx + 1} 章的开头正文。"
+                f"重写本章时，章末收束必须与第 {idx + 1} 章开头在事实、时间线、人物状态上**自然衔接**，"
+                f"不得出现与下一章开头矛盾的情节或设定。"
+                f"本章末尾应为下一章开头的场景/情绪做好铺垫和过渡。\n"
+            )
     mem_parts.append(
         f"【书名】{book_title}\n【全书梗概】\n{premise}\n"
         f"【跨章剧情提要】\n{story_tail or '（尚无累积提要。）'}\n"
@@ -2470,6 +2564,12 @@ def run_rewrite_chapter(
         raise HTTPException(502, f"第 {idx} 章重写失败: {e}") from e
 
     cleaned = sanitize_chapter_body(body)
+    if not cleaned.strip() or len(cleaned.strip()) < 100:
+        # Writer 返回内容过少（可能模型截断或只返回了标题），直接拒绝写入
+        raise HTTPException(
+            502,
+            f"第 {idx} 章重写后正文过少（{len(cleaned.strip())} 字），已阻止覆盖写入。请重试。"
+        )
     if idx > 1:
         prev_path = book_path / "chapters" / f"{idx - 1:02d}.md"
         if prev_path.is_file():
@@ -2479,7 +2579,12 @@ def run_rewrite_chapter(
             except OSError:
                 pass
     cleaned = strip_leading_duplicate_chapter_heading(cleaned, ch_title)
-    cleaned, _ent_sup = _supervisor_review_maybe_local_rewrite(
+    if not cleaned.strip() or len(cleaned.strip()) < 80:
+        raise HTTPException(
+            502,
+            f"第 {idx} 章重写后正文清洗后过少（{len(cleaned.strip())} 字），已阻止覆盖写入。请重试。"
+        )
+    cleaned, ent = _supervisor_review_maybe_local_rewrite(
         live_supervisor=live_supervisor,
         supervisor_local_rewrite=supervisor_local_rewrite,
         agent_profile=agent_profile,
@@ -2495,6 +2600,17 @@ def run_rewrite_chapter(
         writing_temp=writing_temp,
         progress_cb=progress_cb,
     )
+    if ent is not None:
+        try:
+            maybe_append_changelog_after_supervisor(
+                book_path,
+                length_scale=length_scale,
+                chapter_index=idx,
+                supervisor_entry=ent,
+            )
+        except Exception:
+            logger.debug("canon changelog append after rewrite failed", exc_info=True)
+
     content = _chapter_heading(ch_title, idx) + cleaned + "\n"
     write_chapter(root, book_id, idx, content)
     try:
@@ -2506,6 +2622,70 @@ def run_rewrite_chapter(
     except OSError:
         logger.debug("append_agent_orchestration_log failed", exc_info=True)
 
+    snippet = cleaned.replace("\n", " ")[:320]
+    orch = orchestrator_bump_state(
+        read_orchestration_state(root, book_id),
+        step="chapter_rewrite",
+        chapter=idx,
+    )
+    write_orchestration_state(root, book_id, orch)
+
+    # 逐章后处理（与续写 / 全书流水线完全一致）
+    try:
+        _sync_book_memory_entries(book_path, str(idx), cleaned, temperature=0.38, chapter_title=ch_title)
+    except Exception:
+        logger.debug("memory sync after rewrite ch %s failed", idx, exc_info=True)
+    try:
+        _append_rollup_chapter_snippet(book_path, book_title, idx, cleaned, chapter_title=ch_title)
+    except Exception:
+        logger.debug("rollup append after rewrite ch %s failed", idx, exc_info=True)
+    try:
+        append_chapter_tail_snippet(book_path, chapter_n=idx, chapter_title=ch_title, snippet=snippet)
+        maybe_compress_chapter_tail(book_path)
+    except OSError:
+        logger.debug("chapter tail append after rewrite ch %s failed", idx, exc_info=True)
+    try:
+        auto_seed_characters_after_chapter(book_path, chapter_idx=idx, chapter_plain_text=cleaned)
+    except Exception:
+        logger.debug("character auto_seed after rewrite ch %s failed", idx, exc_info=True)
+    try:
+        bump_character_mentions_from_plain(book_path, idx, cleaned)
+    except Exception:
+        logger.debug("character mention bump after rewrite ch %s failed", idx, exc_info=True)
+
+    if foreshadowing_sync_after_chapter:
+        try:
+            sync_foreshadowing_after_chapter(
+                book_root=book_path,
+                chapter_label=str(idx),
+                chapter_plain=cleaned,
+                premise=premise,
+                temperature=0.28,
+            )
+        except Exception:
+            logger.debug("foreshadowing sync after rewrite ch %s failed", idx, exc_info=True)
+    if memory_episodic_keep_last is not None and int(memory_episodic_keep_last) >= 1:
+        try:
+            prune_episodic_extraction_entries(
+                book_path, keep_last=int(memory_episodic_keep_last)
+            )
+        except Exception:
+            logger.debug("memory episodic prune after rewrite failed", exc_info=True)
+
+    if length_scale == "long" and idx > 0 and idx % WIKI_COMPILE_INTERVAL == 0:
+        try:
+            cr = maybe_wiki_compile_episodic_batch(
+                book_path,
+                milestone_chapter=idx,
+                book_title=book_title,
+                premise=premise,
+                temperature=0.35,
+            )
+            if progress_cb and isinstance(cr, dict) and cr.get("ok"):
+                progress_cb({"event": "wiki_compile", "chapter": idx, "wiki_compile": cr})
+        except Exception as e:
+            logger.warning("wiki compile at rewrite chapter %s: %s", idx, e)
+
     _maybe_refresh_kb_synthesis(
         book_path,
         book_title=book_title,
@@ -2516,10 +2696,6 @@ def run_rewrite_chapter(
         sync_book_memory=True,
         progress_cb=progress_cb,
     )
-
-    orch = read_orchestration_state(root, book_id)
-    orch = orchestrator_bump_state(orch, step="chapter_rewrite", chapter=idx)
-    write_orchestration_state(root, book_id, orch)
 
     if progress_cb:
         progress_cb(
@@ -2541,8 +2717,12 @@ def run_rewrite_chapter(
         "saved_file": str(book_path / "chapters" / f"{idx:02d}.md"),
         "agent_log": alog,
     }
-    if _ent_sup is not None:
-        out_rw["live_supervisor"] = [_ent_sup]
+    if ent is not None:
+        out_rw["live_supervisor"] = [ent]
+    if final_supervisor:
+        out_rw["supervisor_final"] = _final_supervisor_for_book(
+            root=root, book_id=book_id, progress_cb=progress_cb
+        )
     return out_rw
 
 
@@ -2568,13 +2748,23 @@ def run_continue_next_chapter(
     memory_episodic_keep_last: Optional[int] = None,
     foreshadowing_sync_after_chapter: bool = False,
     theme_id: Optional[str] = None,
+    distilled_author_card: Optional[str] = None,
 ) -> dict[str, Any]:
     book_path = book_dir(root, book_id)
     voice_block = ""
-    try:
-        voice_block = format_voice_from_book_meta(get_meta(root, book_id))
-    except HTTPException:
-        voice_block = ""
+    if distilled_author_card and distilled_author_card.strip():
+        voice_block = build_voice_prompt_blocks(user_book_note=None, author={"card": distilled_author_card.strip()})
+        try:
+            meta_cur = get_meta(root, book_id)
+            meta_cur["virtual_author"] = {"card": distilled_author_card.strip(), "profession": "蒸馏作者", "source": "distilled"}
+            save_meta(root, book_id, meta_cur)
+        except Exception:
+            pass
+    else:
+        try:
+            voice_block = format_voice_from_book_meta(get_meta(root, book_id))
+        except HTTPException:
+            voice_block = ""
     ch_dir = book_path / "chapters"
     nums: list[tuple[int, Path]] = []
     for p in ch_dir.glob("*.md"):
@@ -2757,12 +2947,22 @@ def run_continue_next_chapter(
         raise HTTPException(502, f"第 {next_n} 章续写失败: {e}") from e
 
     cleaned = sanitize_chapter_body(body)
+    if not cleaned.strip() or len(cleaned.strip()) < 100:
+        raise HTTPException(
+            502,
+            f"第 {next_n} 章续写后正文过少（{len(cleaned.strip())} 字），已阻止写入。请重试。"
+        )
     try:
         prev_plain = _chapter_body_plain_from_file(last_path.read_text(encoding="utf-8"))
         cleaned = strip_common_prefix_with_previous_opening(prev_plain, cleaned)
     except OSError:
         pass
     cleaned = strip_leading_duplicate_chapter_heading(cleaned, title_next)
+    if not cleaned.strip() or len(cleaned.strip()) < 80:
+        raise HTTPException(
+            502,
+            f"第 {next_n} 章续写后正文清洗后过少（{len(cleaned.strip())} 字），已阻止写入。请重试。"
+        )
     cleaned, ent = _supervisor_review_maybe_local_rewrite(
         live_supervisor=live_supervisor,
         supervisor_local_rewrite=supervisor_local_rewrite,
@@ -2949,6 +3149,7 @@ def run_continue_chapters(
     memory_episodic_keep_last: Optional[int] = 48,
     foreshadowing_sync_after_chapter: bool = True,
     theme_id: Optional[str] = None,
+    distilled_author_card: Optional[str] = None,
 ) -> dict[str, Any]:
     """续写多章：逐章调用 run_continue_next_chapter。"""
     n = max(1, min(int(count), MAX_CONTINUE_CHAPTERS))
@@ -3019,6 +3220,7 @@ def run_continue_chapters(
             memory_episodic_keep_last=memory_episodic_keep_last,
             foreshadowing_sync_after_chapter=foreshadowing_sync_after_chapter,
             theme_id=theme_id,
+            distilled_author_card=distilled_author_card if i == 0 else None,
         )
         ls = last.get("live_supervisor")
         if isinstance(ls, list):

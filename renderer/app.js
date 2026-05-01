@@ -909,6 +909,7 @@ function initTabs() {
   const tabs = document.querySelectorAll('.view-tab');
   const writePanel = document.getElementById('panel-write');
   const readPanel = document.getElementById('panel-read');
+  const teardownPanel = document.getElementById('panel-teardown');
   const analyticsPanel = document.getElementById('panel-analytics');
   tabs.forEach((tab) => {
     tab.addEventListener('click', () => {
@@ -920,6 +921,7 @@ function initTabs() {
       });
       writePanel?.classList.toggle('is-active', panelId === 'write');
       readPanel?.classList.toggle('is-active', panelId === 'read');
+      teardownPanel?.classList.toggle('is-active', panelId === 'teardown');
       analyticsPanel?.classList.toggle('is-active', panelId === 'analytics');
       if (panelId === 'read') {
         refreshReaderShell();
@@ -928,6 +930,602 @@ function initTabs() {
         void refreshAnalyticsPanel();
       }
     });
+  });
+}
+
+function initTeardownPanel() {
+  // —— 子导航切换 ——
+  const subTabs = document.querySelectorAll('.teardown-sub-tab');
+  const subPanels = document.querySelectorAll('.teardown-sub-panel');
+  subTabs.forEach((tab) => {
+    tab.addEventListener('click', () => {
+      const subId = tab.dataset.sub;
+      subTabs.forEach((t) => {
+        const on = t.dataset.sub === subId;
+        t.classList.toggle('is-active', on);
+        t.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      subPanels.forEach((p) => {
+        p.classList.toggle('is-active', p.id === `subpanel-${subId}`);
+      });
+    });
+  });
+
+  // —— 辅助函数 ——
+  function setOutputMarkdownText(el, text) {
+    if (!el) return;
+    el.innerHTML = '';
+    if (!text) {
+      const p = document.createElement('p');
+      p.className = 'rail-hint';
+      p.textContent = '尚无输出';
+      el.appendChild(p);
+      return;
+    }
+    const pre = document.createElement('pre');
+    pre.className = 'teardown-pre';
+    pre.textContent = text;
+    el.appendChild(pre);
+  }
+
+  function parseTags(raw) {
+    return String(raw || '')
+      .split(/[,，、;；\s]+/)
+      .map((t) => t.trim())
+      .filter(Boolean);
+  }
+
+  async function matchTagsForDisplay(tags, hintEl) {
+    if (!hintEl) return;
+    hintEl.innerHTML = '';
+    if (!tags.length) return;
+    try {
+      const r = await fetchJson('/api/teardown/match-tags', {
+        method: 'POST',
+        body: JSON.stringify({ tags }),
+      });
+      for (const m of r.matched_themes || []) {
+        const chip = document.createElement('span');
+        chip.className = 'tag-match-chip';
+        chip.textContent = `${m.label || m.id}`;
+        hintEl.appendChild(chip);
+      }
+      for (const ut of r.unmatched_tags || []) {
+        const chip = document.createElement('span');
+        chip.className = 'tag-unmatch-chip';
+        chip.textContent = `${ut}（将自动新建主题）`;
+        hintEl.appendChild(chip);
+      }
+    } catch {
+      // 静默失败
+    }
+  }
+
+  // —— 拆开头标签实时匹配 ——
+  let openingTagTimer = null;
+  document.getElementById('opening-tags')?.addEventListener('input', () => {
+    clearTimeout(openingTagTimer);
+    openingTagTimer = setTimeout(() => {
+      const tags = parseTags(document.getElementById('opening-tags')?.value);
+      void matchTagsForDisplay(tags, document.getElementById('opening-matched-themes'));
+    }, 500);
+  });
+
+  // —— 蒸馏标签实时匹配 ——
+  let distillTagTimer = null;
+  document.getElementById('distill-tags')?.addEventListener('input', () => {
+    clearTimeout(distillTagTimer);
+    distillTagTimer = setTimeout(() => {
+      const tags = parseTags(document.getElementById('distill-tags')?.value);
+      void matchTagsForDisplay(tags, document.getElementById('distill-matched-themes'));
+    }, 500);
+  });
+
+  // ==================== 拆开头 ====================
+  let lastOpeningText = '';
+  const openingRunBtn = document.getElementById('btn-opening-run');
+  const openingSaveKbBtn = document.getElementById('btn-opening-save-kb');
+  const openingWriteMemBtn = document.getElementById('btn-opening-write-memory');
+  const openingOutEl = document.getElementById('opening-output');
+  const openingRunStatus = document.getElementById('opening-run-status');
+  const openingSaveStatus = document.getElementById('opening-save-status');
+
+  openingRunBtn?.addEventListener('click', async () => {
+    const excerpt = document.getElementById('opening-excerpt')?.value?.trim() ?? '';
+    if (excerpt.length < 80) {
+      void showAppAlert('正文节选过短：请至少粘贴约 80 字。', '拆开头');
+      return;
+    }
+    const book_title = document.getElementById('opening-title')?.value?.trim() ?? '';
+    const author = document.getElementById('opening-author')?.value?.trim() ?? '';
+    const tags = parseTags(document.getElementById('opening-tags')?.value);
+    if (openingRunStatus) openingRunStatus.textContent = '调用模型中…';
+    openingRunBtn.disabled = true;
+    openingSaveKbBtn && (openingSaveKbBtn.disabled = true);
+    openingWriteMemBtn && (openingWriteMemBtn.disabled = true);
+    lastOpeningText = '';
+    try {
+      const r = await fetchJson('/api/teardown/opening', {
+        method: 'POST',
+        body: JSON.stringify({ excerpt, book_title, author, tags, temperature: 0.35 }),
+      });
+      lastOpeningText = typeof r?.text === 'string' ? r.text : '';
+      setOutputMarkdownText(openingOutEl, lastOpeningText);
+      if (openingSaveKbBtn) openingSaveKbBtn.disabled = !lastOpeningText;
+      if (openingWriteMemBtn) openingWriteMemBtn.disabled = !lastOpeningText;
+      if (openingRunStatus) openingRunStatus.textContent = lastOpeningText ? '完成' : '无正文返回';
+    } catch (e) {
+      setOutputMarkdownText(openingOutEl, '');
+      if (openingRunStatus) openingRunStatus.textContent = '';
+      void showAppAlert(e?.message || String(e), '拆开头失败');
+    } finally {
+      openingRunBtn.disabled = false;
+    }
+  });
+
+  openingSaveKbBtn?.addEventListener('click', async () => {
+    if (!lastOpeningText) {
+      void showAppAlert('请先生成拆开头报告。', '保存');
+      return;
+    }
+    let name = document.getElementById('opening-kb-filename')?.value?.trim() ?? '';
+    if (!name) {
+      const t = document.getElementById('opening-title')?.value?.trim() || '拆开头';
+      name = `拆开头-${t.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 60)}`;
+    }
+    if (openingSaveStatus) openingSaveStatus.textContent = '写入中…';
+    openingSaveKbBtn.disabled = true;
+    try {
+      await fetchJson('/api/kb/write', {
+        method: 'POST',
+        body: JSON.stringify({ filename: name, content: lastOpeningText }),
+      });
+      if (openingSaveStatus) openingSaveStatus.textContent = '已写入知识库，可在写作台刷新 kb 列表并勾选。';
+      await refreshKbList();
+    } catch (e) {
+      if (openingSaveStatus) openingSaveStatus.textContent = '';
+      void showAppAlert(e?.message || String(e), '保存失败');
+    } finally {
+      openingSaveKbBtn.disabled = !lastOpeningText;
+    }
+  });
+
+  openingWriteMemBtn?.addEventListener('click', async () => {
+    if (!lastOpeningText) {
+      void showAppAlert('请先生成拆开头报告。', '写入记忆');
+      return;
+    }
+    const book_title = document.getElementById('opening-title')?.value?.trim() || '拆开头分析';
+    if (openingSaveStatus) openingSaveStatus.textContent = '写入记忆宫殿中…';
+    openingWriteMemBtn.disabled = true;
+    try {
+      await fetchJson('/api/teardown/write-memory', {
+        method: 'POST',
+        body: JSON.stringify({
+          room: '风格',
+          title: `拆开头分析：${book_title}`,
+          body: lastOpeningText.slice(0, 8000),
+        }),
+      });
+      if (openingSaveStatus) openingSaveStatus.textContent = '已写入记忆宫殿「风格」房间。';
+    } catch (e) {
+      void showAppAlert(e?.message || String(e), '写入记忆失败');
+    } finally {
+      openingWriteMemBtn.disabled = !lastOpeningText;
+    }
+  });
+
+  // ==================== 蒸馏作者 ====================
+  let lastDistillResult = null;
+  const distillRunBtn = document.getElementById('btn-distill-run');
+  const distillSaveSkillBtn = document.getElementById('btn-distill-save-skill');
+  const distillWriteMemBtn = document.getElementById('btn-distill-write-memory');
+  const distillOutEl = document.getElementById('distill-output');
+  const distillRunStatus = document.getElementById('distill-run-status');
+  const distillSaveStatus = document.getElementById('distill-save-status');
+
+  // txt 文件上传（支持超大文件：智能采样头/中/尾各 2 万字）
+  document.getElementById('distill-file')?.addEventListener('change', (ev) => {
+    const file = ev.target.files?.[0];
+    const infoEl = document.getElementById('distill-file-info');
+    const excerptEl = document.getElementById('distill-excerpt');
+    if (!file) {
+      if (infoEl) infoEl.textContent = '';
+      return;
+    }
+    const SAMPLE_SIZE = 20000; // 每段采样字符数
+    const LARGE_THRESHOLD = 10 * 1024 * 1024; // 10MB 以上走采样
+
+    if (file.size > LARGE_THRESHOLD) {
+      // 超大文件：只读头/中/尾各约 SAMPLE_SIZE 字符
+      if (infoEl) infoEl.textContent = `大文件检测（${(file.size / 1024 / 1024).toFixed(1)} MB），正在采样头/中/尾…`;
+      const chunkBytes = SAMPLE_SIZE * 3; // 按 3 倍字节数读（中文 UTF-8 约 3 字节/字）
+      const blobSlice = File.prototype.slice || File.prototype.mozSlice || File.prototype.webkitSlice;
+
+      // 读取头部
+      const readChunk = (start, size) => new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result || ''));
+        r.onerror = reject;
+        r.readAsText(blobSlice.call(file, start, Math.min(start + size, file.size)), 'utf-8');
+      });
+
+      (async () => {
+        try {
+          const mid = Math.floor(file.size / 2);
+          const tail = Math.max(0, file.size - chunkBytes);
+          const [head, middle, end] = await Promise.all([
+            readChunk(0, chunkBytes),
+            readChunk(mid - Math.floor(chunkBytes / 2), chunkBytes),
+            readChunk(tail, chunkBytes),
+          ]);
+          const text = `${head}\n\n…（此处省略大量正文，以下为作品中部采样）…\n\n${middle}\n\n…（此处省略大量正文，以下为作品尾部采样）…\n\n${end}`;
+          if (excerptEl) excerptEl.value = text;
+          // 估算原始字符数（中文 UTF-8 约 3 字节/字符）
+          const estChars = Math.round(file.size / 3);
+          if (infoEl) infoEl.textContent = `已采样 ${file.name}（原始约 ${estChars.toLocaleString()} 字，采样 ${text.length.toLocaleString()} 字）`;
+        } catch {
+          if (infoEl) infoEl.textContent = '读取失败';
+        }
+      })();
+    } else {
+      // 普通文件：完整读取
+      if (infoEl) infoEl.textContent = `加载 ${file.name}（${(file.size / 1024).toFixed(1)} KB）…`;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const text = String(reader.result || '');
+        if (excerptEl) excerptEl.value = text;
+        const charCount = text.length;
+        const truncHint = charCount > 60000 ? '（超长文本，蒸馏时会自动截取头/中/尾样本）' : '';
+        if (infoEl) infoEl.textContent = `已加载 ${file.name}（${charCount.toLocaleString()} 字）${truncHint}`;
+      };
+      reader.onerror = () => {
+        if (infoEl) infoEl.textContent = '读取失败';
+      };
+      reader.readAsText(file, 'utf-8');
+    }
+  });
+
+  distillRunBtn?.addEventListener('click', async () => {
+    const author_name = document.getElementById('distill-author-name')?.value?.trim() ?? '';
+    if (!author_name) {
+      void showAppAlert('请填写作者署名。', '蒸馏作者');
+      return;
+    }
+    const excerpt = document.getElementById('distill-excerpt')?.value?.trim() ?? '';
+    if (excerpt.length < 200) {
+      void showAppAlert('正文过短：请至少粘贴约 200 字（越长蒸馏越准确）。', '蒸馏作者');
+      return;
+    }
+    const book_title = document.getElementById('distill-book-title')?.value?.trim() ?? '';
+    const tags = parseTags(document.getElementById('distill-tags')?.value);
+    if (distillRunStatus) distillRunStatus.textContent = '调用模型蒸馏中…';
+    distillRunBtn.disabled = true;
+    distillSaveSkillBtn && (distillSaveSkillBtn.disabled = true);
+    distillWriteMemBtn && (distillWriteMemBtn.disabled = true);
+    lastDistillResult = null;
+    try {
+      const r = await fetchJson('/api/teardown/distill-author', {
+        method: 'POST',
+        body: JSON.stringify({ excerpt, book_title, author_name, tags, temperature: 0.38 }),
+      });
+      lastDistillResult = r;
+      const displayText = typeof r?.distill_text === 'string' ? r.distill_text : '';
+      setOutputMarkdownText(distillOutEl, displayText);
+      if (distillSaveSkillBtn) distillSaveSkillBtn.disabled = !r?.skill_content;
+      if (distillWriteMemBtn) distillWriteMemBtn.disabled = !displayText;
+      // 自动填充 SKILL 文件名
+      const skillNameEl = document.getElementById('distill-skill-filename');
+      if (skillNameEl && !skillNameEl.value) {
+        skillNameEl.value = `作者-${author_name}风格`;
+      }
+      if (distillRunStatus) distillRunStatus.textContent = displayText ? '蒸馏完成' : '无正文返回';
+      // 蒸馏完成后刷新一键全书区的蒸馏作者下拉列表
+      void loadDistilledAuthors();
+    } catch (e) {
+      setOutputMarkdownText(distillOutEl, '');
+      if (distillRunStatus) distillRunStatus.textContent = '';
+      void showAppAlert(e?.message || String(e), '蒸馏失败');
+    } finally {
+      distillRunBtn.disabled = false;
+    }
+  });
+
+  distillSaveSkillBtn?.addEventListener('click', async () => {
+    if (!lastDistillResult?.skill_content) {
+      void showAppAlert('请先完成蒸馏。', '保存 SKILL');
+      return;
+    }
+    let name = document.getElementById('distill-skill-filename')?.value?.trim() ?? '';
+    if (!name) {
+      name = `作者-${lastDistillResult.author_name || '蒸馏'}风格`;
+    }
+    if (distillSaveStatus) distillSaveStatus.textContent = '写入中…';
+    distillSaveSkillBtn.disabled = true;
+    try {
+      await fetchJson('/api/teardown/save-skill', {
+        method: 'POST',
+        body: JSON.stringify({ filename: name, content: lastDistillResult.skill_content }),
+      });
+      if (distillSaveStatus) distillSaveStatus.textContent = 'SKILL 已写入知识库，可在写作台刷新并勾选调用。';
+      await refreshKbList();
+    } catch (e) {
+      if (distillSaveStatus) distillSaveStatus.textContent = '';
+      void showAppAlert(e?.message || String(e), '保存 SKILL 失败');
+    } finally {
+      distillSaveSkillBtn.disabled = !lastDistillResult?.skill_content;
+    }
+  });
+
+  distillWriteMemBtn?.addEventListener('click', async () => {
+    if (!lastDistillResult?.distill_text) {
+      void showAppAlert('请先完成蒸馏。', '写入记忆');
+      return;
+    }
+    const authorName = lastDistillResult.author_name || '未知作者';
+    if (distillSaveStatus) distillSaveStatus.textContent = '写入记忆宫殿中…';
+    distillWriteMemBtn.disabled = true;
+    try {
+      // 提取虚拟作者卡片作为记忆条目
+      const cardMatch = lastDistillResult.distill_text.match(
+        /【虚拟作者[·.]蒸馏画像】[\s\S]*?(?=\n##|\n---|$)/
+      );
+      const memBody = cardMatch
+        ? cardMatch[0].trim()
+        : lastDistillResult.distill_text.slice(0, 3000);
+      await fetchJson('/api/teardown/write-memory', {
+        method: 'POST',
+        body: JSON.stringify({
+          room: '风格',
+          title: `蒸馏作者：${authorName}`,
+          body: memBody,
+        }),
+      });
+      if (distillSaveStatus) distillSaveStatus.textContent = '已写入记忆宫殿「风格」房间。';
+    } catch (e) {
+      void showAppAlert(e?.message || String(e), '写入记忆失败');
+    } finally {
+      distillWriteMemBtn.disabled = !lastDistillResult?.distill_text;
+    }
+  });
+
+  // ==================== 蒸馏作者 · 历史记录 & 合并 ====================
+  const distillHistoryList = document.getElementById('distill-history-list');
+  const distillHistoryHint = document.getElementById('distill-history-hint');
+  const distillMergeBar = document.getElementById('distill-merge-bar');
+  const distillMergeCount = document.getElementById('distill-merge-count');
+  const distillMergeBtn = document.getElementById('btn-distill-merge');
+  const distillHistoryRefresh = document.getElementById('btn-distill-history-refresh');
+
+  // 记录选择状态
+  const distillSelectedRecords = new Set();
+
+  function parseTimestamp(ts) {
+    const d = new Date(ts * 1000);
+    return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  }
+
+  async function refreshDistillHistory() {
+    const authorName = document.getElementById('distill-author-name')?.value?.trim() ?? '';
+    if (!distillHistoryList) return;
+    distillSelectedRecords.clear();
+    distillHistoryList.innerHTML = '';
+
+    if (!authorName) {
+      if (distillHistoryHint) distillHistoryHint.textContent = '输入作者署名后自动加载历史';
+      if (distillMergeBar) distillMergeBar.hidden = true;
+      return;
+    }
+
+    if (distillHistoryHint) distillHistoryHint.textContent = '加载中…';
+    try {
+      const r = await fetchJson(`/api/teardown/distill-history?author_name=${encodeURIComponent(authorName)}`);
+      const records = r.records || [];
+      if (!records.length) {
+        distillHistoryList.innerHTML = '';
+        if (distillHistoryHint) distillHistoryHint.textContent = '此作者暂无蒸馏记录。蒸馏后会自动保存。';
+        if (distillMergeBar) distillMergeBar.hidden = true;
+        return;
+      }
+
+      if (distillHistoryHint) distillHistoryHint.textContent = '';
+      distillHistoryList.innerHTML = '';
+
+      for (const rec of records) {
+        const isMerged = !!rec.merged;
+        const row = document.createElement('div');
+        row.className = 'distill-history-item' + (isMerged ? ' distill-history-item--merged' : '');
+
+        // 合并记录不参与再次合并，用专用标记替代复选框
+        if (isMerged) {
+          const badge = document.createElement('span');
+          badge.className = 'distill-merged-badge';
+          badge.textContent = '已合并';
+          badge.title = '此为合并蒸馏结果，用作虚拟作者时会优先使用';
+          row.appendChild(badge);
+        } else {
+          const cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.className = 'distill-history-cb';
+          cb.value = rec.id;
+          cb.addEventListener('change', () => {
+            if (cb.checked) distillSelectedRecords.add(rec.id);
+            else distillSelectedRecords.delete(rec.id);
+            updateDistillMergeBar();
+          });
+          row.appendChild(cb);
+        }
+
+        const label = document.createElement('span');
+        label.className = 'distill-history-label';
+        label.textContent = `${rec.book_title || '未命名'} · ${parseTimestamp(rec.timestamp)}`;
+
+        const viewBtn = document.createElement('button');
+        viewBtn.type = 'button';
+        viewBtn.className = 'btn btn-ghost btn-sm';
+        viewBtn.textContent = '查看';
+        viewBtn.addEventListener('click', async () => {
+          try {
+            const d = await fetchJson(`/api/teardown/distill-detail?author_name=${encodeURIComponent(authorName)}&record_id=${rec.id}`);
+            if (d.text) {
+              setOutputMarkdownText(distillOutEl, d.text);
+              // 也填充 SKILL
+              if (lastDistillResult) {
+                lastDistillResult = { ...lastDistillResult, distill_text: d.text };
+              }
+            }
+          } catch (e) {
+            void showAppAlert(e?.message || String(e), '查看失败');
+          }
+        });
+
+        row.appendChild(label);
+        row.appendChild(viewBtn);
+        distillHistoryList.appendChild(row);
+      }
+
+      // 如果只有 1 篇，提示可以蒸馏更多再合并
+      if (records.length === 1) {
+        if (distillHistoryHint) distillHistoryHint.textContent = '已蒸馏 1 篇。再蒸馏同一作者的其他作品后，可合并为综合画像。';
+      } else {
+        if (distillHistoryHint) distillHistoryHint.textContent = `已蒸馏 ${records.length} 篇。勾选 ≥2 篇可合并为综合画像。`;
+      }
+      updateDistillMergeBar();
+
+    } catch {
+      distillHistoryList.innerHTML = '';
+      if (distillHistoryHint) distillHistoryHint.textContent = '无法加载蒸馏历史';
+      if (distillMergeBar) distillMergeBar.hidden = true;
+    }
+  }
+
+  function updateDistillMergeBar() {
+    const count = distillSelectedRecords.size;
+    if (distillMergeCount) distillMergeCount.textContent = `已选 ${count} 篇`;
+    if (distillMergeBar) distillMergeBar.hidden = false;
+    if (distillMergeBtn) distillMergeBtn.disabled = count < 2;
+    if (distillMergeBtn) distillMergeBtn.textContent = count < 2 ? '合并蒸馏（需选 ≥2 篇）' : `合并 ${count} 篇蒸馏`;
+  }
+
+  distillHistoryRefresh?.addEventListener('click', refreshDistillHistory);
+
+  // 作者名输入变化时自动加载历史
+  let distillAuthorTimer = null;
+  document.getElementById('distill-author-name')?.addEventListener('input', () => {
+    clearTimeout(distillAuthorTimer);
+    distillAuthorTimer = setTimeout(refreshDistillHistory, 800);
+  });
+
+  // 合并蒸馏按钮
+  distillMergeBtn?.addEventListener('click', async () => {
+    const authorName = document.getElementById('distill-author-name')?.value?.trim() ?? '';
+    if (!authorName || distillSelectedRecords.size < 2) return;
+    if (distillSaveStatus) distillSaveStatus.textContent = '合并蒸馏中（调用模型）…';
+    distillMergeBtn.disabled = true;
+    try {
+      const r = await fetchJson('/api/teardown/merge-distill', {
+        method: 'POST',
+        body: JSON.stringify({
+          author_name: authorName,
+          record_ids: Array.from(distillSelectedRecords),
+          temperature: 0.38,
+        }),
+      });
+      const mergedText = r.merged_text || '';
+      if (mergedText) {
+        lastDistillResult = {
+          ok: true,
+          distill_text: mergedText,
+          skill_content: r.skill_content || '',
+          author_name: authorName,
+        };
+        setOutputMarkdownText(distillOutEl, mergedText);
+        if (distillSaveSkillBtn) distillSaveSkillBtn.disabled = !r.skill_content;
+        if (distillWriteMemBtn) distillWriteMemBtn.disabled = false;
+        const skillNameEl = document.getElementById('distill-skill-filename');
+        if (skillNameEl && !skillNameEl.value) {
+          skillNameEl.value = `作者-${authorName}风格`;
+        }
+        if (distillSaveStatus) distillSaveStatus.textContent = `合并完成（综合自 ${r.merged_count || distillSelectedRecords.size} 篇蒸馏）。可保存 SKILL 或写入记忆。`;
+      }
+    } catch (e) {
+      void showAppAlert(e?.message || String(e), '合并蒸馏失败');
+      if (distillSaveStatus) distillSaveStatus.textContent = '';
+    } finally {
+      distillMergeBtn.disabled = distillSelectedRecords.size < 2;
+    }
+  });
+
+  // ==================== 经典长篇拆书 ====================
+  let lastReportText = '';
+  const runBtn = document.getElementById('btn-teardown-run');
+  const saveBtn = document.getElementById('btn-teardown-save-kb');
+  const outEl = document.getElementById('teardown-output');
+  const runStatus = document.getElementById('teardown-run-status');
+  const saveStatus = document.getElementById('teardown-save-status');
+
+  runBtn?.addEventListener('click', async () => {
+    const excerpt = document.getElementById('teardown-excerpt')?.value?.trim() ?? '';
+    if (excerpt.length < 80) {
+      void showAppAlert('正文节选过短：请至少粘贴约 80 字再拆书。', '拆书');
+      return;
+    }
+    const book_title = document.getElementById('teardown-title')?.value?.trim() ?? '';
+    const mode = document.getElementById('teardown-mode')?.value ?? 'quick';
+    const excerpt_note = document.getElementById('teardown-note')?.value?.trim() ?? '';
+    if (runStatus) runStatus.textContent = '调用模型中…';
+    runBtn.disabled = true;
+    saveBtn && (saveBtn.disabled = true);
+    lastReportText = '';
+    try {
+      const r = await fetchJson('/api/teardown/novel', {
+        method: 'POST',
+        body: JSON.stringify({
+          excerpt,
+          book_title,
+          mode,
+          excerpt_note,
+          temperature: 0.35
+        })
+      });
+      lastReportText = typeof r?.text === 'string' ? r.text : '';
+      setOutputMarkdownText(outEl, lastReportText);
+      if (saveBtn) saveBtn.disabled = !lastReportText;
+      if (runStatus) runStatus.textContent = lastReportText ? '完成' : '无正文返回';
+    } catch (e) {
+      setOutputMarkdownText(outEl, '');
+      if (runStatus) runStatus.textContent = '';
+      void showAppAlert(e?.message || String(e), '拆书失败');
+    } finally {
+      runBtn.disabled = false;
+    }
+  });
+
+  saveBtn?.addEventListener('click', async () => {
+    if (!lastReportText) {
+      void showAppAlert('请先生成拆书报告。', '保存');
+      return;
+    }
+    let name = document.getElementById('teardown-kb-filename')?.value?.trim() ?? '';
+    if (!name) {
+      const t = document.getElementById('teardown-title')?.value?.trim() || '拆书';
+      name = `拆书-${t.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 60)}`;
+    }
+    if (saveStatus) saveStatus.textContent = '写入中…';
+    saveBtn.disabled = true;
+    try {
+      await fetchJson('/api/kb/write', {
+        method: 'POST',
+        body: JSON.stringify({ filename: name, content: lastReportText })
+      });
+      if (saveStatus) saveStatus.textContent = '已写入知识库，可在写作台刷新 kb 列表并勾选。';
+      await refreshKbList();
+    } catch (e) {
+      if (saveStatus) saveStatus.textContent = '';
+      void showAppAlert(e?.message || String(e), '保存失败');
+    } finally {
+      saveBtn.disabled = !lastReportText;
+    }
   });
 }
 
@@ -1002,7 +1600,8 @@ async function refreshHealth() {
   try {
     const h = await fetchJson('/api/health');
     const ds = h.deepseek_configured ? '已配置 Key' : '未配置 Key';
-    el.textContent = `后端正常 · ${ds}`;
+    const tw = h.teardown_framework === false ? ' · 拆书框架缺失' : '';
+    el.textContent = `后端正常 · ${ds}${tw}`;
     el.className = 'status-pill is-ok';
     const pathsEl = document.getElementById('paths-display');
     if (pathsEl && h.books_root) {
@@ -1167,10 +1766,62 @@ async function refreshMemList() {
   }
 }
 
+/** 加载蒸馏作者列表到所有虚拟作者下拉框（一键全书/续写/重写） */
+async function loadDistilledAuthors() {
+  const selectors = [
+    { id: 'pipeline-distilled-author', defaultText: null },
+    { id: 'continue-distilled-author', defaultText: null },
+    { id: 'rewrite-distilled-author', defaultText: null },
+  ];
+  const sels = selectors
+    .map((s) => ({ ...s, el: document.getElementById(s.id) }))
+    .filter((s) => s.el);
+  if (!sels.length) return;
+
+  // 保存当前选择
+  const currents = sels.map((s) => s.el.value);
+  // 清除除第一项以外的所有选项
+  for (const s of sels) {
+    while (s.el.options.length > 1) s.el.remove(1);
+  }
+
+  try {
+    const resp = await fetchJson('/api/teardown/distill-authors');
+    const list = resp?.authors || resp;
+    if (Array.isArray(list)) {
+      for (const item of list) {
+        const name = item.author_name || '';
+        if (!name) continue;
+        const count = item.count || 0;
+        const books = (item.books || []).slice(0, 3).join('、');
+        const label = `${name}（${count} 篇${books ? '：' + books : ''}）`;
+        for (let i = 0; i < sels.length; i++) {
+          const opt = document.createElement('option');
+          opt.value = name;
+          opt.textContent = label;
+          sels[i].el.appendChild(opt);
+        }
+      }
+    }
+    // 恢复之前的选择
+    for (let i = 0; i < sels.length; i++) {
+      if (currents[i]) sels[i].el.value = currents[i];
+    }
+  } catch {
+    // 静默失败
+  }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   initUiTheme();
   initIdeationSlider();
   initTabs();
+  initTeardownPanel();
+  loadDistilledAuthors();
+
+  document.getElementById('btn-refresh-distilled-authors')?.addEventListener('click', () => {
+    void loadDistilledAuthors();
+  });
 
   document.getElementById('btn-analytics-refresh')?.addEventListener('click', () => {
     void refreshAnalyticsPanel();
@@ -1456,6 +2107,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (plannedTotalChapters !== undefined) {
       payload.planned_total_chapters = plannedTotalChapters;
     }
+    const distilledAuthorVal = document.getElementById('pipeline-distilled-author')?.value?.trim();
+    if (distilledAuthorVal) {
+      payload.distilled_author_name = distilledAuthorVal;
+    }
     try {
       const base = await apiBase();
       const streamUrl = joinBackendUrl(base, '/api/pipeline/from-title/stream');
@@ -1632,6 +2287,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         ? Math.min(MAX_CONTINUE_CHAPTERS, Math.max(1, cc))
         : 1;
       let payload = { ...basePayload, chapter_count: chapterCount };
+      const continueDistilledAuthor = document.getElementById('continue-distilled-author')?.value?.trim();
+      if (continueDistilledAuthor) payload.distilled_author_name = continueDistilledAuthor;
       if (raw.startsWith('book:')) {
         payload.book_id = raw.slice(5);
       } else if (raw.startsWith('legacy:')) {
@@ -1728,6 +2385,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         live_supervisor: document.getElementById('rewrite-live-supervisor')?.checked ?? false,
         ...(note ? { rewrite_author_note: note } : {})
       };
+      const rewriteDistilledAuthor = document.getElementById('rewrite-distilled-author')?.value?.trim();
+      if (rewriteDistilledAuthor) payload.distilled_author_name = rewriteDistilledAuthor;
       const data = await fetchJson('/api/pipeline/rewrite-chapter', {
         method: 'POST',
         body: JSON.stringify(payload)

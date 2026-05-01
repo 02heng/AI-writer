@@ -34,7 +34,7 @@ from .book_storage import (
     write_memory_summary,
 )
 from .library_fs import list_out_markdown, list_series, safe_out_md_path, safe_series_prefix
-from .llm import chat_completion, stream_chat_completion
+from .llm import ContextWindowExhausted, chat_completion, stream_chat_completion
 from .orchestration.supervisor import (
     agent_supervisor_meta_review,
     load_context_for_supervisor_review,
@@ -83,6 +83,19 @@ from .analytics_store import (
     save_supervisor_review_snapshot,
 )
 from .paths import analytics_root, ensure_layout, snapshots_library_dir, user_data_root
+from .teardown import build_oh_story_long_analyze_system, teardown_framework_ok
+from .teardown_v2 import (
+    distill_author,
+    list_distill_records,
+    list_all_distill_authors,
+    match_themes_by_tags,
+    merge_distill_reports,
+    read_distill_detail,
+    save_distill_record,
+    save_merged_distill_record,
+    teardown_opening,
+    _load_distill_index,
+)
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 THEMES = load_themes(PACKAGE_DIR)
@@ -160,6 +173,15 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(ContextWindowExhausted)
+async def _ctx_window_exhausted_handler(request, exc: ContextWindowExhausted):  # type: ignore[no-untyped-def]
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=507,
+        content={"detail": str(exc)},
+    )
+
+
 class GenerateBody(BaseModel):
     user_message: str = Field(..., min_length=1)
     prompt_name: str = Field(default="writer.md", description="prompts 目录下文件名")
@@ -187,6 +209,65 @@ class OutlineBody(BaseModel):
         le=1,
         description="脑洞程度：0 极保守，0.5 正常，1 高创意",
     )
+
+
+class TeardownNovelBody(BaseModel):
+    """长篇拆文：oh-story-claudecode story-long-analyze 框架 + 用户粘贴节选。"""
+
+    excerpt: str = Field(..., min_length=80, max_length=200_000)
+    book_title: str = Field(default="", max_length=200)
+    mode: str = Field(default="quick", description="quick | deep")
+    excerpt_note: str = Field(default="", max_length=500, description="如：第1～3章节选")
+    temperature: float = Field(default=0.35, ge=0, le=1.5)
+
+    @model_validator(mode="after")
+    def _norm_mode(self) -> TeardownNovelBody:
+        m = (self.mode or "quick").strip().lower()
+        if m not in ("quick", "deep"):
+            raise ValueError("mode 须为 quick 或 deep")
+        self.mode = m
+        return self
+
+
+class TeardownOpeningBody(BaseModel):
+    """拆开头：分析作品开头的写作思路、笔法、如何激发读者兴趣。"""
+
+    excerpt: str = Field(..., min_length=80, max_length=200_000)
+    book_title: str = Field(default="", max_length=200)
+    author: str = Field(default="", max_length=100, description="作者名")
+    tags: list[str] = Field(default_factory=list, description="用户标签，用于匹配主题")
+    temperature: float = Field(default=0.35, ge=0, le=1.5)
+
+
+class DistillAuthorBody(BaseModel):
+    """蒸馏作者：从作品中蒸馏作者画像，生成独立 SKILL。"""
+
+    excerpt: str = Field(..., min_length=200, max_length=2_000_000)
+    book_title: str = Field(default="", max_length=200)
+    author_name: str = Field(default="", max_length=100, description="作者署名")
+    tags: list[str] = Field(default_factory=list, description="用户标签")
+    temperature: float = Field(default=0.38, ge=0, le=1.5)
+
+
+class TeardownWriteMemoryBody(BaseModel):
+    """拆书结果写入记忆宫殿。"""
+
+    room: str = Field(default="风格", description="记忆房间")
+    title: str = Field(..., min_length=1, max_length=200)
+    body: str = Field(..., min_length=1)
+    chapter_label: Optional[str] = None
+    book_id: Optional[str] = Field(default=None, max_length=32, description="指定书本（可选）")
+
+
+class TeardownMatchTagsBody(BaseModel):
+    """标签匹配主题。"""
+
+    tags: list[str] = Field(..., min_items=1)
+
+
+class KbWriteBody(BaseModel):
+    filename: str = Field(..., min_length=1, max_length=180)
+    content: str = Field(default="")
 
 
 class MemoryEntryCreate(BaseModel):
@@ -272,6 +353,11 @@ class PipelineFromTitleBody(BaseModel):
         default=False,
         description="一键全书：每章后更新结构化伏笔 JSON（额外 API）",
     )
+    distilled_author_name: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="可选：已蒸馏的作者名称；若指定，用其蒸馏画像替代随机虚拟作者",
+    )
 
     @model_validator(mode="after")
     def planned_total_ge_round(self) -> PipelineFromTitleBody:
@@ -333,6 +419,11 @@ class PipelineContinueBody(BaseModel):
         default=True,
         description="每章后续写后同步 memory/foreshadowing.json（开放/已收）；仅 book_id",
     )
+    distilled_author_name: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="可选：已蒸馏的作者名称；若指定，替换当前书籍的虚拟作者风格",
+    )
 
 
 class PipelineRewriteChapterBody(BaseModel):
@@ -370,6 +461,25 @@ class PipelineRewriteChapterBody(BaseModel):
         default=None,
         max_length=8000,
         description="用户对该章重写的补充意图、想改的方向等，会注入模型提示，不写入 plan",
+    )
+    final_supervisor: bool = Field(
+        default=False,
+        description="为真时重写完成后运行总监督并写入 orchestration/state.json",
+    )
+    memory_episodic_keep_last: int = Field(
+        default=48,
+        ge=0,
+        le=500,
+        description="情节房间自动萃取条目保留最近条数，0=不淘汰",
+    )
+    foreshadowing_sync_after_chapter: bool = Field(
+        default=True,
+        description="重写后同步 memory/foreshadowing.json（开放/已收）",
+    )
+    distilled_author_name: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="可选：已蒸馏的作者名称；若指定，替换当前书籍的虚拟作者风格",
     )
 
 
@@ -428,7 +538,7 @@ def _compose_system(base_system: str, theme_id: Optional[str]) -> str:
 
 
 # 递增：Electron 启动时用于识别「本机 18765 上是否为当前应用的后端」，避免旧版/他进程占位导致 404。
-API_REVISION = 9
+API_REVISION = 10
 
 
 @app.get("/api/health")
@@ -449,6 +559,7 @@ def health():
         "deepseek_configured": has_key,
         "analytics_root": str(ar),
         "snapshots_dir": str(snap),
+        "teardown_framework": teardown_framework_ok(),
     }
 
 
@@ -491,6 +602,258 @@ def list_kb():
         return {"files": []}
     files = sorted(p.name for p in kb.glob("*.md"))
     return {"files": files}
+
+
+@app.post("/api/kb/write")
+def kb_write(body: KbWriteBody):
+    """将 Markdown 写入 UserData/kb/（单文件名，防路径穿越）。"""
+    raw = body.filename.strip()
+    if not raw:
+        raise HTTPException(400, "filename 不能为空")
+    safe = Path(raw).name
+    if safe.startswith("."):
+        raise HTTPException(400, "禁止使用隐藏文件名")
+    if not safe.endswith(".md"):
+        safe = f"{safe}.md"
+    kb_dir = ROOT / "kb"
+    kb_dir.mkdir(parents=True, exist_ok=True)
+    out = kb_dir / safe
+    try:
+        out.write_text(body.content or "", encoding="utf-8")
+    except OSError as e:
+        raise HTTPException(500, f"写入 kb 失败: {e}") from e
+    return {"ok": True, "name": safe, "path": str(out)}
+
+
+@app.post("/api/teardown/novel")
+def teardown_novel(body: TeardownNovelBody):
+    """长篇拆书：内置 worldwonderer/oh-story-claudecode 的 story-long-analyze。"""
+    if not teardown_framework_ok():
+        raise HTTPException(
+            500,
+            "拆书框架未就绪：请确认仓库内 third_party/oh-story-claudecode/skills/story-long-analyze 完整",
+        )
+    try:
+        system = build_oh_story_long_analyze_system()
+    except FileNotFoundError as e:
+        raise HTTPException(500, str(e)) from e
+    mode_zh = "快速" if body.mode == "quick" else "深度"
+    user = (
+        f"【书名】{body.book_title.strip() or '（未提供）'}\n"
+        f"【拆书模式】{mode_zh}（{body.mode}）\n"
+        f"【节选说明】{body.excerpt_note.strip() or '（未说明；请根据正文推断覆盖范围）'}\n\n"
+        f"=== 以下待拆正文（仅分析此部分） ===\n\n"
+        f"{body.excerpt.strip()}"
+    )
+    try:
+        text = chat_completion(
+            system=system,
+            user=user,
+            temperature=body.temperature,
+        )
+    except RuntimeError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        raise HTTPException(502, f"模型调用失败: {e}") from e
+    return {"text": text}
+
+
+@app.post("/api/teardown/opening")
+def api_teardown_opening(body: TeardownOpeningBody):
+    """拆开头：分析作品开头的写作思路、笔法、如何激发读者兴趣。"""
+    tags = [t.strip() for t in (body.tags or []) if t.strip()]
+    result = teardown_opening(
+        body.excerpt,
+        book_title=body.book_title.strip(),
+        author=body.author.strip(),
+        tags=tags,
+        temperature=body.temperature,
+    )
+    if not result.get("ok"):
+        detail = result.get("error", "拆开头失败")
+        status = 400 if "RuntimeError" in detail or "缺少" in detail else 502
+        raise HTTPException(status, detail)
+    # 主题匹配
+    matched = match_themes_by_tags(tags, THEMES)
+    result["matched_themes"] = [{"id": t["id"], "label": t.get("label", "")} for t in matched]
+    result["tags"] = tags
+    return result
+
+
+@app.post("/api/teardown/distill-author")
+def api_distill_author(body: DistillAuthorBody):
+    """蒸馏作者：从作品中蒸馏作者画像，生成独立 SKILL。"""
+    tags = [t.strip() for t in (body.tags or []) if t.strip()]
+    result = distill_author(
+        body.excerpt,
+        book_title=body.book_title.strip(),
+        author_name=body.author_name.strip(),
+        tags=tags,
+        temperature=body.temperature,
+    )
+    if not result.get("ok"):
+        detail = result.get("error", "蒸馏作者失败")
+        status = 400 if "RuntimeError" in detail or "缺少" in detail else 502
+        raise HTTPException(status, detail)
+    # 自动保存蒸馏记录
+    author_name = body.author_name.strip() or "未知作者"
+    book_title = body.book_title.strip() or "未命名作品"
+    try:
+        record = save_distill_record(
+            ROOT,
+            author_name=author_name,
+            book_title=book_title,
+            distill_text=result["distill_text"],
+            skill_content=result.get("skill_content", ""),
+        )
+        result["saved_record"] = record
+    except Exception as e:
+        logger.warning("save distill record failed: %s", e)
+    # 主题匹配
+    matched = match_themes_by_tags(tags, THEMES)
+    result["matched_themes"] = [{"id": t["id"], "label": t.get("label", "")} for t in matched]
+    result["tags"] = tags
+    # 附上此作者已有的蒸馏历史
+    try:
+        result["history"] = list_distill_records(ROOT, author_name)
+    except Exception:
+        result["history"] = []
+    return result
+
+
+@app.get("/api/teardown/distill-authors")
+def api_distill_authors():
+    """列出所有已蒸馏的作者及作品数。"""
+    return {"authors": list_all_distill_authors(ROOT)}
+
+
+@app.get("/api/teardown/distill-history")
+def api_distill_history(author_name: str):
+    """列出某作者的所有蒸馏记录。"""
+    return {"records": list_distill_records(ROOT, author_name)}
+
+
+@app.get("/api/teardown/distill-detail")
+def api_distill_detail(author_name: str, record_id: str):
+    """读取某次蒸馏的详细报告。"""
+    text = read_distill_detail(ROOT, author_name, record_id)
+    if not text:
+        raise HTTPException(404, "记录不存在或文件已丢失")
+    return {"text": text}
+
+
+class MergeDistillBody(BaseModel):
+    author_name: str = Field(..., min_length=1, max_length=100)
+    record_ids: list[str] = Field(..., min_items=2, description="要合并的蒸馏记录 ID 列表")
+    temperature: float = Field(default=0.38, ge=0, le=1.5)
+
+
+@app.post("/api/teardown/merge-distill")
+def api_merge_distill(body: MergeDistillBody):
+    """合并同一作者的多篇蒸馏结果为一个综合画像。"""
+    author_name = body.author_name.strip()
+    index = {}
+    try:
+        from .teardown_v2 import _load_distill_index
+        index = _load_distill_index(ROOT)
+    except Exception:
+        pass
+    all_records = index.get(author_name, [])
+    # 收集要合并的记录
+    distill_texts = []
+    book_titles = []
+    for rid in body.record_ids:
+        text = read_distill_detail(ROOT, author_name, rid)
+        if not text:
+            raise HTTPException(404, f"蒸馏记录 {rid} 不存在")
+        distill_texts.append(text)
+        # 从索引中找到对应书名
+        book_title = "未知作品"
+        for r in all_records:
+            if r.get("id") == rid:
+                book_title = r.get("book_title", "未知作品")
+                break
+        book_titles.append(book_title)
+
+    if len(distill_texts) < 2:
+        raise HTTPException(400, "至少需要 2 篇蒸馏记录才能合并")
+
+    result = merge_distill_reports(
+        distill_texts,
+        author_name=author_name,
+        book_titles=book_titles,
+        temperature=body.temperature,
+    )
+    if not result.get("ok"):
+        detail = result.get("error", "合并失败")
+        raise HTTPException(502, detail)
+    # 自动保存合并结果
+    try:
+        merged_record = save_merged_distill_record(
+            ROOT,
+            author_name=author_name,
+            merged_text=result.get("distill_text", ""),
+            skill_content=result.get("skill_content", ""),
+            source_record_ids=body.record_ids,
+        )
+        result["saved_record"] = merged_record
+    except Exception as e:
+        logger.warning("save merged distill record failed: %s", e)
+    return result
+
+
+@app.post("/api/teardown/write-memory")
+def api_teardown_write_memory(body: TeardownWriteMemoryBody):
+    """将拆书/蒸馏结果写入记忆宫殿。"""
+    root = book_dir(ROOT, body.book_id) if body.book_id else ROOT
+    init_db(root)
+    row = add_entry(
+        root,
+        room=body.room,
+        title=body.title,
+        body=body.body,
+        chapter_label=body.chapter_label,
+    )
+    return {"ok": True, "entry": row}
+
+
+@app.post("/api/teardown/match-tags")
+def api_teardown_match_tags(body: TeardownMatchTagsBody):
+    """标签匹配主题：检查哪些标签对应已有主题。"""
+    tags = [t.strip() for t in body.tags if t.strip()]
+    matched = match_themes_by_tags(tags, THEMES)
+    # 判断是否有未匹配的标签需要新建主题
+    matched_ids = {t["id"] for t in matched}
+    unmatched_tags = [t for t in tags if not match_themes_by_tags([t], THEMES)]
+    result = {
+        "tags": tags,
+        "matched_themes": [{"id": t["id"], "label": t.get("label", "")} for t in matched],
+        "matched_ids": list(matched_ids),
+        "unmatched_tags": unmatched_tags,
+        "has_unmatched": len(unmatched_tags) > 0,
+    }
+    return result
+
+
+@app.post("/api/teardown/save-skill")
+def api_teardown_save_skill(body: KbWriteBody):
+    """保存蒸馏作者 SKILL 到 UserData/kb/，可被写作台勾选。"""
+    raw = body.filename.strip()
+    if not raw:
+        raise HTTPException(400, "filename 不能为空")
+    safe = Path(raw).name
+    if safe.startswith("."):
+        raise HTTPException(400, "禁止使用隐藏文件名")
+    if not safe.endswith(".md"):
+        safe = f"{safe}.md"
+    kb_dir = ROOT / "kb"
+    kb_dir.mkdir(parents=True, exist_ok=True)
+    out = kb_dir / safe
+    try:
+        out.write_text(body.content or "", encoding="utf-8")
+    except OSError as e:
+        raise HTTPException(500, f"写入 SKILL 失败: {e}") from e
+    return {"ok": True, "name": safe, "path": str(out)}
 
 
 @app.get("/api/prompts")
@@ -720,6 +1083,44 @@ def api_book_memory_extract(book_id: str, body: ExtractMemoryBody):
     return {"entry": row, "text": bullets}
 
 
+def _resolve_distilled_author_card(author_name: Optional[str]) -> Optional[str]:
+    """解析蒸馏作者名为虚拟作者卡片文本。优先使用合并结果，避免每次重合并。"""
+    name = (author_name or "").strip()
+    if not name:
+        return None
+    index = _load_distill_index(ROOT)
+    records = index.get(name)
+    if not records:
+        return None
+    # 优先取已保存的合并记录（避免每次调用 LLM 合并）
+    for r in records:
+        if r.get("merged"):
+            detail_file = r.get("detail_file", "")
+            if detail_file:
+                p = ROOT / detail_file
+                if p.is_file():
+                    try:
+                        text = p.read_text(encoding="utf-8", errors="replace")
+                        if text.strip():
+                            return text
+                    except OSError:
+                        pass
+    # 无合并记录：只有一条则直接返回，多条不自动合并（太大）
+    for r in records:
+        if not r.get("merged"):
+            detail_file = r.get("detail_file", "")
+            if detail_file:
+                p = ROOT / detail_file
+                if p.is_file():
+                    try:
+                        text = p.read_text(encoding="utf-8", errors="replace")
+                        if text.strip():
+                            return text
+                    except OSError:
+                        pass
+    return None
+
+
 @app.post("/api/pipeline/from-title")
 def pipeline_from_title(body: PipelineFromTitleBody):
     writer_path = ROOT / "prompts" / "writer.md"
@@ -735,6 +1136,7 @@ def pipeline_from_title(body: PipelineFromTitleBody):
     ap = (body.agent_profile or "fast").strip().lower()
     if ap not in ("fast", "full"):
         ap = "fast"
+    distilled_card = _resolve_distilled_author_card(body.distilled_author_name)
     try:
         ls = body.length_scale.strip().lower()
         if ls not in ("short", "medium", "long"):
@@ -771,6 +1173,7 @@ def pipeline_from_title(body: PipelineFromTitleBody):
             ),
             foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
             theme_id=str(body.theme_id or "general"),
+            distilled_author_card=distilled_card,
         )
     except HTTPException:
         raise
@@ -800,6 +1203,7 @@ async def pipeline_from_title_stream(body: PipelineFromTitleBody):
     pg = body.protagonist_gender.strip().lower()
     if pg not in ("male", "female", "any"):
         pg = "any"
+    distilled_card = _resolve_distilled_author_card(body.distilled_author_name)
 
     async def gen():
         q: Queue = Queue()
@@ -840,6 +1244,7 @@ async def pipeline_from_title_stream(body: PipelineFromTitleBody):
                     ),
                     foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
                     theme_id=str(body.theme_id or "general"),
+                    distilled_author_card=distilled_card,
                 )
                 q.put(("done", r))
             except HTTPException as he:
@@ -897,6 +1302,7 @@ def pipeline_continue(body: PipelineContinueBody):
     sp = (body.series_prefix or "").strip()
     mek = int(body.memory_episodic_keep_last)
     episodic_keep = mek if mek > 0 else None
+    distilled_card = _resolve_distilled_author_card(body.distilled_author_name)
     try:
         if bid:
             cnt = max(1, min(int(body.chapter_count or 1), MAX_CONTINUE_CHAPTERS))
@@ -922,6 +1328,7 @@ def pipeline_continue(body: PipelineContinueBody):
                     memory_episodic_keep_last=episodic_keep,
                     foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
                     theme_id=str(body.theme_id or "general"),
+                    distilled_author_card=distilled_card,
                 )
             else:
                 result = run_continue_next_chapter(
@@ -943,6 +1350,7 @@ def pipeline_continue(body: PipelineContinueBody):
                     memory_episodic_keep_last=episodic_keep,
                     foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
                     theme_id=str(body.theme_id or "general"),
+                    distilled_author_card=distilled_card,
                 )
         elif sp:
             prefix = safe_series_prefix(sp)
@@ -989,6 +1397,9 @@ def pipeline_rewrite_chapter(body: PipelineRewriteChapterBody):
     bid = (body.book_id or "").strip()
     if not bid:
         raise HTTPException(400, "请提供 book_id")
+    mek = int(body.memory_episodic_keep_last or 0)
+    episodic_keep = mek if mek > 0 else None
+    distilled_card = _resolve_distilled_author_card(body.distilled_author_name)
     try:
         return run_rewrite_chapter(
             root=ROOT,
@@ -1006,8 +1417,12 @@ def pipeline_rewrite_chapter(body: PipelineRewriteChapterBody):
             ideation_level=body.ideation_level,
             live_supervisor=bool(body.live_supervisor),
             supervisor_local_rewrite=bool(body.supervisor_local_rewrite),
+            final_supervisor=bool(body.final_supervisor),
+            memory_episodic_keep_last=episodic_keep,
+            foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
             theme_id=str(body.theme_id or "general"),
             rewrite_author_note=body.rewrite_author_note,
+            distilled_author_card=distilled_card,
         )
     except HTTPException:
         raise

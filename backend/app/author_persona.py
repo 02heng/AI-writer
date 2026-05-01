@@ -149,7 +149,11 @@ def build_voice_prompt_blocks(
     if note:
         parts.append("【用户全书项目说明（须尊重、可内化）】\n" + note[:6000])
     if author and isinstance(author, dict) and str(author.get("card") or "").strip():
-        parts.append(str(author["card"]).strip()[:6000])
+        parts.append(str(author["card"]).strip()[:8000])
+    if note and author and isinstance(author, dict) and str(author.get("card") or "").strip():
+        parts.append(
+            "【滤光优先级】若虚拟作者人格与用户全书项目说明在基调、禁忌或主线取舍上冲突，以用户全书项目说明为准。"
+        )
     parts.append(WRITER_VOICE_PHILOSOPHY)
     return "\n\n".join(parts).strip()
 

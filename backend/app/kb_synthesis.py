@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ AUTHOR_BIBLE_SYNTHESIS_NAME = "author-bible-synthesis.md"
 
 _SYNTHESIS_HEADER = (
     "【作者圣经·总则（本书，按 author-bible-template 结构自动维护；"
-    "编写正文时优先于「记忆宫殿」采信；与梗概冲突时以梗概与用户说明为准）】"
+    "编写正文时优先于「记忆宫殿」采信；与梗概冲突时以**用户全书项目说明（若存在）**优先于梗概，其次梗概）】"
 )
 
 
@@ -45,6 +46,17 @@ def merge_writer_kb_block(book_path: Path, user_kb_extras: str) -> str:
     if u:
         parts.append(u)
     return "\n\n".join(parts).strip()
+
+
+def _user_book_note_from_meta(book_path: Path) -> str:
+    mp = (book_path / "meta.json").resolve()
+    if not mp.is_file():
+        return ""
+    try:
+        meta = json.loads(mp.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    return str(meta.get("user_book_note") or "").strip()
 
 
 def _skip_synthesis_llm() -> bool:
@@ -88,6 +100,11 @@ def refresh_author_bible_synthesis_after_chapter(
     if len(ch) > 10000:
         ch = ch[:10000] + "…（中略）"
 
+    ubn = _user_book_note_from_meta(book_path)
+    note_block = ""
+    if ubn:
+        note_block = f"【用户全书项目说明（与梗概或旧总则冲突时以此为最高优先级）】\n{ubn[:4500]}\n\n"
+
     sys_p = (
         "你是长篇小说作者圣经编辑。必须根据给定「结构模板」输出**一份完整、可独立阅读**的 Markdown 作者圣经总则，"
         "用于后续章节写作时优先于记忆宫殿采信。\n"
@@ -98,11 +115,12 @@ def refresh_author_bible_synthesis_after_chapter(
         "表格用 Markdown 表格语法，单元格内用短句；无信息可写「待补」或留空但保留表头。\n"
         "2）在旧总则基础上**合并**本章正文中**可沉淀为设定**的新增/变更：人物、年表、规则、伏笔等；"
         "不要大段复述正文场景描写；不要评价文笔；不要输出 JSON 或应酬话。\n"
-        "3）若与【全书梗概】冲突，以梗概为最高锚点，总则中注明待人工核对。\n"
+        "3）若与【全书梗概】或【用户全书项目说明】冲突：**以用户全书项目说明为最高锚点**，其次梗概；总则中注明待人工核对。\n"
         "4）只输出 Markdown 正文，不要外层代码围栏。"
     )
     user_p = (
         f"【书名】{book_title}\n"
+        f"{note_block}"
         f"【全书梗概】\n{(premise or '')[:5000]}\n\n"
         f"【结构模板（须遵循其章节骨架；同仓库 `author-bible-template.md`）】\n{template}\n\n"
         f"【上一版总则（无则当首次撰写；请合并而非丢弃旧信息）】\n{prev or '（尚无。请据梗概与本章建立初版。）'}\n\n"

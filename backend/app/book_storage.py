@@ -201,6 +201,12 @@ def get_meta(data_root: Path, book_id: str) -> dict[str, Any]:
     return json.loads(mp.read_text(encoding="utf-8"))
 
 
+def save_meta(data_root: Path, book_id: str, meta: dict[str, Any]) -> None:
+    """覆写 meta.json（保留 book_id 字段）。"""
+    mp = book_dir(data_root, book_id) / "meta.json"
+    mp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def get_plan(data_root: Path, book_id: str) -> dict[str, Any]:
     pp = book_dir(data_root, book_id) / "plan.json"
     if not pp.is_file():

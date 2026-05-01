@@ -25,7 +25,7 @@
           <span class="brand-glyph" aria-hidden="true">文</span>
           <div class="brand-text">
             <span class="brand-name">AI Writer</span>
-            <span class="brand-sub">本地书库 · 记忆宫殿 · DeepSeek</span>
+            <span class="brand-sub">本地书库 · 拆书 · 记忆宫殿 · DeepSeek</span>
           </div>
         </div>
 
@@ -35,6 +35,9 @@
           </button>
           <button type="button" class="view-tab" data-panel="read" id="tab-read" role="tab" aria-selected="false">
             书库阅读
+          </button>
+          <button type="button" class="view-tab" data-panel="teardown" id="tab-teardown" role="tab" aria-selected="false">
+            拆书
           </button>
         </nav>
 
@@ -152,8 +155,18 @@
                     class="inp"
                     rows="4"
                     maxlength="8000"
-                    placeholder="可写你对整部书的立意、气质、想强调的主题或禁忌等；会参与策划、写入本书记忆宫殿，并在每章写作时注入。"
+                    placeholder="立意、气质、主题、禁忌、结构偏好等。若填写，策划与正文以你的说明为最高优先级（在原创与安全前提下），优于题材套路与虚拟作者滤光。"
                   ></textarea>
+                </div>
+                <div class="form-col-span2">
+                  <label class="lbl" for="pipeline-distilled-author">虚拟作者（可选，从蒸馏作者中选择）</label>
+                  <div class="distilled-author-row">
+                    <select id="pipeline-distilled-author" class="inp inp-select">
+                      <option value="">不指定（系统随机生成）</option>
+                    </select>
+                    <button type="button" class="btn btn-sm" id="btn-refresh-distilled-authors" title="刷新蒸馏作者列表">刷新</button>
+                  </div>
+                  <p class="rail-hint" id="distilled-author-hint">选择已蒸馏的作者风格，替代随机虚拟作者。需先在「拆书 → 蒸馏作者」中完成蒸馏。</p>
                 </div>
                 <div>
                   <label class="lbl" for="pipeline-agent-profile">编排模式</label>
@@ -230,6 +243,15 @@
                     <option value="">—— 点击刷新加载 ——</option>
                   </select>
                 </div>
+                <div class="form-col-span2">
+                  <label class="lbl" for="continue-distilled-author">替换虚拟作者（可选）</label>
+                  <div class="distilled-author-row">
+                    <select id="continue-distilled-author" class="inp inp-select">
+                      <option value="">不替换（沿用当前书籍虚拟作者）</option>
+                    </select>
+                  </div>
+                  <p class="rail-hint" style="margin-top: 0.2rem">选择后，本次续写将用该蒸馏作者替换当前书籍的虚拟作者风格，并持久化到后续续写。</p>
+                </div>
                 <div>
                   <label class="lbl" for="continue-chapter-count">续写章数（仅书本）</label>
                   <input type="number" id="continue-chapter-count" class="inp" min="1" max="500" value="1" />
@@ -301,6 +323,15 @@
                   <select id="series-rewrite-select" class="inp inp-select">
                     <option value="">—— 与上方列表同步，请先刷新 ——</option>
                   </select>
+                </div>
+                <div class="form-col-span2">
+                  <label class="lbl" for="rewrite-distilled-author">替换虚拟作者（可选）</label>
+                  <div class="distilled-author-row">
+                    <select id="rewrite-distilled-author" class="inp inp-select">
+                      <option value="">不替换（沿用当前书籍虚拟作者）</option>
+                    </select>
+                  </div>
+                  <p class="rail-hint" style="margin-top: 0.2rem">选择后，本次重写将用该蒸馏作者替换当前书籍的虚拟作者风格，并持久化到后续续写。</p>
                 </div>
                 <div>
                   <label class="lbl" for="rewrite-chapter-index">章号</label>
@@ -546,6 +577,190 @@
               <button type="button" class="btn btn-secondary" id="reader-next-ch">下一章</button>
             </div>
           </section>
+        </div>
+      </div>
+
+      <!-- 拆书（v2：拆开头 + 蒸馏作者 + 旧版长篇拆书） -->
+      <div id="panel-teardown" class="view-panel" role="tabpanel">
+        <!-- 拆书子导航 -->
+        <nav class="teardown-sub-tabs" role="tablist" aria-label="拆书模式">
+          <button type="button" class="teardown-sub-tab is-active" data-sub="opening" id="subtab-opening" role="tab" aria-selected="true">
+            拆开头
+          </button>
+          <button type="button" class="teardown-sub-tab" data-sub="distill" id="subtab-distill" role="tab" aria-selected="false">
+            蒸馏作者
+          </button>
+          <button type="button" class="teardown-sub-tab" data-sub="classic" id="subtab-classic" role="tab" aria-selected="false">
+            长篇拆书（经典）
+          </button>
+        </nav>
+
+        <!-- ========== 拆开头 ========== -->
+        <div id="subpanel-opening" class="teardown-sub-panel is-active" role="tabpanel">
+          <div class="teardown-grid">
+            <section class="surface teardown-pane">
+              <div class="surface-head">
+                <h2 class="surface-title">拆开头 · 分析写作技巧</h2>
+                <p class="surface-lead">
+                  粘贴作品开头节选（通常前1～3章），AI 会拆解开篇钩子、入戏节奏、笔法特征、人设技巧，并提炼可执行的 Do/Don't 规则。
+                  请仅粘贴<strong>你有权使用</strong>的正文节选。
+                </p>
+              </div>
+              <label class="lbl" for="opening-title">书名（可选）</label>
+              <input type="text" id="opening-title" class="inp" placeholder="作品名" autocomplete="off" />
+              <label class="lbl" for="opening-author">作者（可选）</label>
+              <input type="text" id="opening-author" class="inp" placeholder="作者名" autocomplete="off" />
+              <label class="lbl" for="opening-tags">作品标签（逗号分隔，用于匹配主题）</label>
+              <input type="text" id="opening-tags" class="inp" placeholder="如：都市、言情、悬疑" autocomplete="off" />
+              <div id="opening-matched-themes" class="teardown-tag-hint"></div>
+              <label class="lbl" for="opening-excerpt">正文节选</label>
+              <textarea id="opening-excerpt" class="inp teardown-ta" rows="12" placeholder="粘贴作品开头正文（不少于约 80 字）…"></textarea>
+              <div class="teardown-actions">
+                <button type="button" class="btn btn-primary" id="btn-opening-run">开始拆开头</button>
+                <span id="opening-run-status" class="rail-hint" role="status"></span>
+              </div>
+            </section>
+            <section class="surface teardown-pane">
+              <div class="surface-head">
+                <h2 class="surface-title">拆开头报告</h2>
+                <p class="surface-lead">
+                  生成后可保存到知识库 <span class="inline-code">UserData/kb/*.md</span>（写作台勾选参与生成），
+                  也可写入记忆宫殿供后续创作参考。
+                </p>
+              </div>
+              <div id="opening-output" class="teardown-output" aria-live="polite">
+                <p class="rail-hint">尚无输出</p>
+              </div>
+              <div class="teardown-save-row">
+                <label class="lbl" for="opening-kb-filename" style="margin:0">保存为 kb 文件名</label>
+                <input type="text" id="opening-kb-filename" class="inp" placeholder="例如：拆开头-作品名.md" autocomplete="off" />
+                <button type="button" class="btn btn-secondary" id="btn-opening-save-kb" disabled>保存到知识库</button>
+                <button type="button" class="btn btn-ghost" id="btn-opening-write-memory" disabled>写入记忆宫殿</button>
+              </div>
+              <p id="opening-save-status" class="rail-hint" role="status"></p>
+            </section>
+          </div>
+        </div>
+
+        <!-- ========== 蒸馏作者 ========== -->
+        <div id="subpanel-distill" class="teardown-sub-panel" role="tabpanel">
+          <div class="teardown-grid">
+            <section class="surface teardown-pane">
+              <div class="surface-head">
+                <h2 class="surface-title">蒸馏作者 · 提炼风格画像</h2>
+                <p class="surface-lead">
+                  上传作品 txt 文件或粘贴大段正文，AI 会蒸馏出作者的笔法特征、用词习惯、情感滤光等，生成<strong>独立 SKILL</strong>。
+                  同一作者可蒸馏多篇作品，最后<strong>合并为一个综合画像</strong>。请仅使用<strong>你有权使用</strong>的作品。
+                </p>
+              </div>
+              <label class="lbl" for="distill-author-name">作者署名（必填）</label>
+              <input type="text" id="distill-author-name" class="inp" placeholder="作者名" autocomplete="off" />
+              <label class="lbl" for="distill-book-title">书名（可选）</label>
+              <input type="text" id="distill-book-title" class="inp" placeholder="作品名" autocomplete="off" />
+              <label class="lbl" for="distill-tags">作品标签（逗号分隔，用于匹配主题）</label>
+              <input type="text" id="distill-tags" class="inp" placeholder="如：都市、言情、悬疑" autocomplete="off" />
+              <div id="distill-matched-themes" class="teardown-tag-hint"></div>
+              <label class="lbl" for="distill-file">上传作品 txt 文件（或在下方粘贴正文）</label>
+              <div class="teardown-file-row">
+                <input type="file" id="distill-file" accept=".txt,.text" class="inp inp-file" />
+                <span id="distill-file-info" class="rail-hint"></span>
+              </div>
+              <label class="lbl" for="distill-excerpt">正文内容</label>
+              <textarea id="distill-excerpt" class="inp teardown-ta" rows="10" placeholder="粘贴或从上方上传作品正文（不少于约 200 字，越长蒸馏越准确）…"></textarea>
+              <div class="teardown-actions">
+                <button type="button" class="btn btn-primary" id="btn-distill-run">开始蒸馏</button>
+                <span id="distill-run-status" class="rail-hint" role="status"></span>
+              </div>
+            </section>
+            <section class="surface teardown-pane">
+              <div class="surface-head">
+                <h2 class="surface-title">蒸馏报告 · 作者 SKILL</h2>
+                <p class="surface-lead">
+                  蒸馏完成后，可将 SKILL 保存到知识库。写作台勾选后，AI 将以此作者的风格滤光进行创作。
+                </p>
+              </div>
+              <div id="distill-output" class="teardown-output" aria-live="polite">
+                <p class="rail-hint">尚无输出</p>
+              </div>
+              <div class="teardown-save-row">
+                <label class="lbl" for="distill-skill-filename" style="margin:0">SKILL 文件名</label>
+                <input type="text" id="distill-skill-filename" class="inp" placeholder="例如：作者-笔名风格.md" autocomplete="off" />
+                <button type="button" class="btn btn-secondary" id="btn-distill-save-skill" disabled>保存 SKILL 到知识库</button>
+                <button type="button" class="btn btn-ghost" id="btn-distill-write-memory" disabled>写入记忆宫殿</button>
+              </div>
+              <p id="distill-save-status" class="rail-hint" role="status"></p>
+
+              <!-- 此作者已蒸馏的作品列表 & 合并 -->
+              <div class="distill-history-section">
+                <div class="distill-history-head">
+                  <h3 class="sub-block-title">此作者已蒸馏的作品</h3>
+                  <button type="button" class="btn btn-ghost btn-sm" id="btn-distill-history-refresh">刷新</button>
+                </div>
+                <p class="rail-hint" id="distill-history-hint">输入作者署名后自动加载历史</p>
+                <div id="distill-history-list" class="distill-history-list"></div>
+                <div id="distill-merge-bar" class="distill-merge-bar" hidden>
+                  <span id="distill-merge-count" class="rail-hint">已选 0 篇</span>
+                  <button type="button" class="btn btn-primary btn-sm" id="btn-distill-merge" disabled>合并蒸馏（需选 ≥2 篇）</button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <!-- ========== 长篇拆书（经典） ========== -->
+        <div id="subpanel-classic" class="teardown-sub-panel" role="tabpanel">
+          <div class="teardown-grid">
+            <section class="surface teardown-pane">
+              <div class="surface-head">
+                <h2 class="surface-title">长篇拆书</h2>
+                <p class="surface-lead">
+                  框架来自开源
+                  <a
+                    href="https://github.com/worldwonderer/oh-story-claudecode"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >oh-story-claudecode</a>
+                  的 <span class="inline-code">story-long-analyze</span>（黄金三章、节奏、爽点、整书结构模板）。请仅粘贴<strong>你有权使用</strong>的正文节选；不参与盗版站全文抓取。
+                </p>
+              </div>
+              <label class="lbl" for="teardown-title">书名（可选）</label>
+              <input type="text" id="teardown-title" class="inp" placeholder="对标作品名" autocomplete="off" />
+              <label class="lbl" for="teardown-mode">拆书模式</label>
+              <select id="teardown-mode" class="inp inp-select" aria-label="拆书模式">
+                <option value="quick">快速：黄金三章 + 整体结构 + 拆文报告</option>
+                <option value="deep">深度：单次回复内尽量按深度模板结构化</option>
+              </select>
+              <label class="lbl" for="teardown-note">节选说明（可选）</label>
+              <input
+                type="text"
+                id="teardown-note"
+                class="inp"
+                placeholder="如：第1～3章 / 开篇 + 第一次大转折"
+                autocomplete="off"
+              />
+              <label class="lbl" for="teardown-excerpt">正文节选</label>
+              <textarea id="teardown-excerpt" class="inp teardown-ta" rows="14" placeholder="粘贴待分析正文（不少于约 80 字）…"></textarea>
+              <div class="teardown-actions">
+                <button type="button" class="btn btn-primary" id="btn-teardown-run">开始拆书</button>
+                <span id="teardown-run-status" class="rail-hint" role="status"></span>
+              </div>
+            </section>
+            <section class="surface teardown-pane">
+              <div class="surface-head">
+                <h2 class="surface-title">拆书报告</h2>
+                <p class="surface-lead">生成后可保存到左侧知识库目录 <span class="inline-code">UserData/kb/*.md</span>，写作台勾选即可参与生成。</p>
+              </div>
+              <div id="teardown-output" class="teardown-output" aria-live="polite">
+                <p class="rail-hint">尚无输出</p>
+              </div>
+              <label class="lbl" for="teardown-kb-filename">保存为 kb 文件名</label>
+              <div class="teardown-save-row">
+                <input type="text" id="teardown-kb-filename" class="inp" placeholder="例如：拆书-对标作品.md" autocomplete="off" />
+                <button type="button" class="btn btn-secondary" id="btn-teardown-save-kb" disabled>保存到知识库</button>
+              </div>
+              <p id="teardown-save-status" class="rail-hint" role="status"></p>
+            </section>
+          </div>
         </div>
       </div>
     </div>

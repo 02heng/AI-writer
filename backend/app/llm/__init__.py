@@ -49,6 +49,19 @@ class LLMTransportError(Exception):
     """在多次重试后仍无法连上 DeepSeek / OpenAI 兼容接口时抛出（非配置类错误）。"""
 
 
+class ContextWindowExhausted(Exception):
+    """提示上下文窗口已满，输出空间不足以生成有意义的回复。"""
+
+    def __init__(self, prompt_tokens: int, context_limit: int, remaining: int) -> None:
+        self.prompt_tokens = prompt_tokens
+        self.context_limit = context_limit
+        self.remaining = remaining
+        super().__init__(
+            f"上下文窗口已满（prompt≈{prompt_tokens} tokens，窗口={context_limit}），"
+            f"剩余输出空间仅 {remaining} tokens。请精简蒸馏卡片、记忆或主题内容后重试。"
+        )
+
+
 def _env_int(name: str, default: int, lo: int, hi: int) -> int:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -151,10 +164,11 @@ def reset_llm_client_cache() -> None:
 def writer_completion_max_tokens() -> int:
     """章节正文希望申请的 max_tokens 上限（实际发送前会再按上下文收紧）。
 
-    单条回复的 API 上限常见为 8192；若与超长 prompt 相加超过模型上下文，服务商可能仍返回
-    与 max_tokens 相关的 400，故 chat_completion 内会动态 clamp。
+    DeepSeek V4 支持 1M 上下文窗口、384K 输出。
+    若与超长 prompt 相加超过模型上下文，服务商可能仍返回与 max_tokens 相关的 400，
+    故 chat_completion 内会动态 clamp。
     """
-    return _env_int("AIWRITER_WRITER_MAX_TOKENS", 8192, 1, 8192)
+    return _env_int("AIWRITER_WRITER_MAX_TOKENS", 16384, 1, 384000)
 
 
 def _estimate_prompt_tokens(system: str, user: str) -> int:
@@ -172,11 +186,15 @@ def _clamp_max_tokens_to_context(
     user: str,
 ) -> int:
     """保证 prompt + max_tokens 不易超过模型上下文；并遵守单条 max_tokens API 上限。"""
-    api_max = _env_int("AIWRITER_COMPLETION_MAX_API", 8192, 1024, 8192)
-    ctx = _env_int("AIWRITER_MODEL_CONTEXT_TOKENS", 28000, 4096, 200000)
+    api_max = _env_int("AIWRITER_COMPLETION_MAX_API", 16384, 1024, 384000)
+    ctx = _env_int("AIWRITER_MODEL_CONTEXT_TOKENS", 1000000, 4096, 1000000)
     reserve = _env_int("AIWRITER_COMPLETION_RESERVE", 384, 64, 8192)
     est_in = _estimate_prompt_tokens(system, user)
     room = ctx - est_in - reserve
+    # 输出空间严重不足时直接抛错，避免静默返回空内容
+    min_output = _env_int("AIWRITER_COMPLETION_MIN_OUTPUT", 512, 64, 4096)
+    if room < min_output:
+        raise ContextWindowExhausted(est_in, ctx, max(0, room))
     if room < 1:
         room = 1
     cap = min(max(1, requested), api_max, room)
