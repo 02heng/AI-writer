@@ -5,6 +5,28 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 
+function getElectronApp() {
+  try {
+    return require('electron').app;
+  } catch {
+    return null;
+  }
+}
+
+/** 安装包内 PyInstaller onedir：resources/backend-bin/aiwriter-backend(.exe) */
+function resolveBundledBackendExe() {
+  const app = getElectronApp();
+  if (!app || !app.isPackaged) return null;
+  const base = path.join(process.resourcesPath, 'backend-bin');
+  const name = process.platform === 'win32' ? 'aiwriter-backend.exe' : 'aiwriter-backend';
+  const exePath = path.join(base, name);
+  if (!fs.existsSync(exePath)) {
+    console.warn('[backend] 已打包但未找到冻结后端，将回退本机 Python：', exePath);
+    return null;
+  }
+  return exePath;
+}
+
 const BACKEND_PORT = 18765;
 const HEALTH_PATH = '/api/health';
 const MIN_API_REVISION = 2;
@@ -33,7 +55,7 @@ function readSettings(userDataPath) {
   }
 }
 
-function waitForBackendReady() {
+function waitForBackendReady(fromBundledExe) {
   return new Promise((resolve, reject) => {
     let attempts = 0;
     const tryOnce = () => {
@@ -84,7 +106,13 @@ function waitForBackendReady() {
 
       function retry() {
         if (attempts >= HEALTH_RETRIES) {
-          reject(new Error('后端在超时时间内未就绪，请确认已安装 Python 依赖：pip install -r backend/requirements.txt'));
+          reject(
+            new Error(
+              fromBundledExe
+                ? '后端内置程序在超时时间内未就绪，请重开应用或检查安全软件是否拦截。'
+                : '后端在超时时间内未就绪，请确认已安装 Python 依赖：pip install -r backend/requirements.txt'
+            )
+          );
           return;
         }
         setTimeout(tryOnce, HEALTH_DELAY_MS);
@@ -112,22 +140,13 @@ function startBackend({ userDataPath, projectRoot }) {
     const booksRoot = (settings.booksRoot || '').trim();
 
     const backendDir = path.join(projectRoot, 'backend');
-    const { cmd, argsPrefix } = getPythonCmd();
-    const args = [
-      ...argsPrefix,
-      '-m',
-      'uvicorn',
-      'app.main:app',
-      '--host',
-      '127.0.0.1',
-      '--port',
-      String(BACKEND_PORT)
-    ];
+    const bundledExe = resolveBundledBackendExe();
 
     const env = {
       ...process.env,
       AIWRITER_USER_DATA: userDataPath,
       AIWRITER_PROJECT_ROOT: projectRoot,
+      AIWRITER_BACKEND_PORT: String(BACKEND_PORT),
       DEEPSEEK_API_KEY: apiKey,
       DEEPSEEK_MODEL: model,
       PYTHONUTF8: '1',
@@ -148,12 +167,33 @@ function startBackend({ userDataPath, projectRoot }) {
     }
 
     try {
-      backendProcess = spawn(cmd, args, {
-        cwd: backendDir,
-        env,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
+      if (bundledExe) {
+        console.log('[backend] start frozen:', bundledExe);
+        backendProcess = spawn(bundledExe, [], {
+          cwd: path.dirname(bundledExe),
+          env,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe']
+        });
+      } else {
+        const { cmd, argsPrefix } = getPythonCmd();
+        const args = [
+          ...argsPrefix,
+          '-m',
+          'uvicorn',
+          'app.main:app',
+          '--host',
+          '127.0.0.1',
+          '--port',
+          String(BACKEND_PORT)
+        ];
+        backendProcess = spawn(cmd, args, {
+          cwd: backendDir,
+          env,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe']
+        });
+      }
     } catch (e) {
       reject(e);
       return;
@@ -175,7 +215,7 @@ function startBackend({ userDataPath, projectRoot }) {
       backendProcess = null;
     });
 
-    waitForBackendReady()
+    waitForBackendReady(Boolean(bundledExe))
       .then(() => {
         console.log('[backend] ready on port', BACKEND_PORT);
         resolve();

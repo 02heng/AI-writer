@@ -16,3 +16,7 @@ backend/memory/*.sqlite3
 memory/*.sqlite3
 # 仓库根目录误放的本地 memory/（实际数据在 UserData/books）
 memory/
+
+# PyInstaller 中间产物与 onedir 输出
+backend/build/
+backend/dist/

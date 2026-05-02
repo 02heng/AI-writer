@@ -7,8 +7,9 @@
   "scripts": {
     "start": "electron .",
     "backend": "npm run dev --prefix backend",
-    "pack": "electron-builder --dir",
-    "dist": "electron-builder --publish never"
+    "build-backend": "node scripts/build-backend.cjs",
+    "pack": "npm run build-backend && electron-builder --dir",
+    "dist": "npm run build-backend && electron-builder --publish never"
   },
   "devDependencies": {
     "electron": "^35.0.0",
@@ -20,11 +21,12 @@
     "directories": {
       "output": "release"
     },
-    "files": [
-      "electron/**/*",
-      "renderer/**/*",
-      "backend/**/*",
-      "package.json"
+    "files": ["electron/**/*", "renderer/**/*", "package.json"],
+    "extraResources": [
+      {
+        "from": "backend/dist/aiwriter-backend",
+        "to": "backend-bin"
+      }
     ],
     "asarUnpack": ["electron/**/*"],
     "win": {

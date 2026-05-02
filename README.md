@@ -83,10 +83,17 @@ npm run backend
 
 ## 打包发布
 
+安装包内已用 **PyInstaller** 将后端打成 `aiwriter-backend`，一般用户**无需再装 Python**。开发时 `npm start` 仍走本机 `uvicorn`。
+
 ```bash
-npm run pack    # 输出到 release/，不安装器
-npm run dist    # 构建安装包（electron-builder，当前配置含 Windows NSIS 等）
+# 需本机：Python 3.12+、pip install -r backend/requirements.txt -r backend/requirements-build.txt
+npm run build-backend   # 仅打 Python 冻结包 → backend/dist/aiwriter-backend/
+
+npm run pack    # 先 build-backend，再 electron-builder --dir → release/
+npm run dist    # 先 build-backend，再打安装包（Windows NSIS / macOS DMG+ZIP 等）
 ```
+
+CI：推送 `v*` tag 时 workflows 会装好 Python 依赖后执行 `npm run dist`。
 
 ## 测试
 
