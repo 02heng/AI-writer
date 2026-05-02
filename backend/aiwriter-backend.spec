@@ -5,12 +5,21 @@ PyInstaller spec: 生成 backend/dist/aiwriter-backend/（onedir）
 """
 
 import pathlib
+import sys
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 block_cipher = None
 
 WORK = pathlib.Path(SPECPATH)
+if str(WORK) not in sys.path:
+    sys.path.insert(0, str(WORK))
+
+try:
+    # run_server.py 仅以字符串传给 uvicorn，Analysis 若不显式打入则冻结版无法 import app.main
+    _app_hidden = list(collect_submodules("app"))
+except Exception:
+    _app_hidden = ["app.main"]
 
 def _merge_collect(*names):
     datas, binaries, hidden = [], [], []
@@ -43,7 +52,7 @@ datas = _pkg_datas + [
 
 binaries = _pkg_bins
 
-hiddenimports = _pkg_hidden + [
+hiddenimports = _pkg_hidden + _app_hidden + [
     "uvicorn.logging",
     "uvicorn.loops",
     "uvicorn.loops.auto",
