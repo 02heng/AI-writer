@@ -632,14 +632,39 @@ body {
 .theme-cascade-grid {
   flex: 1 1 auto;
   min-height: 0;
-  overflow: auto;
+  overflow-y: auto;
   overflow-x: hidden;
   padding: 0.75rem;
+  padding-right: 0.5rem;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.5rem;
   align-content: start;
+  /* 留出稳定滚动槽，避免仅靠触控板/滚轮时才出现细条 */
+  scrollbar-gutter: stable;
   scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 45%, transparent) var(--surface-2);
+  overscroll-behavior: contain;
+}
+
+.theme-cascade-grid::-webkit-scrollbar {
+  width: 10px;
+}
+
+.theme-cascade-grid::-webkit-scrollbar-track {
+  background: var(--surface-2);
+  border-radius: 999px;
+  margin: 0.25rem 0;
+}
+
+.theme-cascade-grid::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text-muted) 38%, var(--surface-3, var(--surface-2)));
+  border-radius: 999px;
+  border: 2px solid var(--surface-2);
+}
+
+.theme-cascade-grid::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--accent) 45%, var(--text-muted));
 }
 
 .theme-cascade-preview {
