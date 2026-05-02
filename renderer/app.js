@@ -2081,6 +2081,21 @@ function bindThemeCascadeOnce() {
   });
 }
 
+/** 与本仓库 backend/app/data/themes.json 同步（scripts/sync-themes.cjs → predist）。
+ * 后端 /api/themes 暂不可用时仍可展示完整「作品分类」，避免只剩 7 条极简兜底。 */
+async function loadRendererBundledThemesList() {
+  try {
+    const url = new URL('themes-bundled.json', window.location.href);
+    const res = await fetch(url.href, { cache: 'no-store' });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data) && data.length > 0 ? data : [];
+  } catch (e) {
+    console.warn('themes-bundled.json:', e);
+    return [];
+  }
+}
+
 async function refreshThemes() {
   const box = document.getElementById('theme-tags');
   if (!box) return;
@@ -2096,6 +2111,9 @@ async function refreshThemes() {
       if (attempt === 4) console.warn('主题 API:', e);
     }
     await new Promise((r) => setTimeout(r, 280 * (attempt + 1)));
+  }
+  if (!list.length) {
+    list = await loadRendererBundledThemesList();
   }
   themesCache = list.length > 0 ? list : FALLBACK_THEMES;
   bindThemeCascadeOnce();

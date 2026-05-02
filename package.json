@@ -7,7 +7,10 @@
   "scripts": {
     "start": "electron .",
     "backend": "npm run dev --prefix backend",
+    "sync-themes": "node scripts/sync-themes.cjs",
     "build-backend": "node scripts/build-backend.cjs",
+    "prepack": "node scripts/sync-themes.cjs",
+    "predist": "node scripts/sync-themes.cjs",
     "pack": "npm run build-backend && electron-builder --dir",
     "dist": "npm run build-backend && electron-builder --publish never"
   },
