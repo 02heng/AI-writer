@@ -143,3 +143,19 @@ def strip_common_prefix_with_previous_opening(
     if len(rest) < min_kept_after_strip:
         return new_chapter_plain
     return rest
+
+
+def prose_ascii_double_quotes_to_single(text: str) -> str:
+    """将 ASCII 双引号及常见弯双引号转为 ASCII 单引号。
+
+    用于虚拟作者 card、蒸馏报告等：避免未转义双引号在下游 JSON 拼接、旧版工具或模型输出中破坏结构。
+    """
+    if not text:
+        return text
+    return (
+        text.replace("\u201c", "'")
+        .replace("\u201d", "'")
+        .replace("\u201e", "'")
+        .replace("\u201f", "'")
+        .replace('"', "'")
+    )

@@ -156,6 +156,80 @@ const FALLBACK_THEMES = [
   }
 ];
 
+/** 写作台侧边栏分组（可与 themes.json 单条可选 `category` 叠加，未标注则按 id 回落） */
+const THEME_SIDEBAR_ROWS = [
+  ['main', '一类'],
+  ['plot', '二类'],
+  ['character', '三类'],
+  ['emotion', '四类'],
+  ['backdrop', '五类']
+];
+
+const THEME_SIDEBAR_KEYS = new Set(THEME_SIDEBAR_ROWS.map((r) => r[0]));
+
+const THEME_ID_SIDEBAR = {
+  realism: 'backdrop',
+  urban: 'backdrop',
+  fantasy: 'main',
+  xianxia: 'main',
+  scifi: 'main',
+  cyberpunk: 'backdrop',
+  postapoc: 'backdrop',
+  horror: 'emotion',
+  romance: 'emotion',
+  ancient_romance: 'emotion',
+  cosmic: 'emotion',
+  game: 'main',
+  annals_fiction: 'main',
+  artifact_pov: 'plot',
+  soft_apocalypse: 'backdrop',
+  ethnographic_weird: 'backdrop',
+  weather_law: 'backdrop',
+  culinary_weird: 'character',
+  loop_literary: 'plot',
+  dream_industry: 'emotion',
+  rust_romanticism: 'emotion',
+  sigil_economy: 'backdrop',
+  mycelium_society: 'backdrop',
+  grammar_magic: 'plot',
+  emotion_tax: 'plot',
+  tidal_memory: 'plot',
+  night_republic: 'backdrop',
+  parasitic_architecture: 'backdrop',
+  wormhole_post: 'plot',
+  probability_herds: 'plot',
+  joke_materialize: 'plot',
+  failed_archaeology: 'plot',
+  silence_endemic: 'character',
+  authenticity_war: 'character',
+  reverse_domestication: 'character',
+  outsourced_divinity: 'plot',
+  map_fraud: 'backdrop',
+  celestial_nursery: 'emotion',
+  symmetry_trade: 'plot',
+  moss_epoch: 'emotion',
+  fanwork: 'main'
+};
+
+function sidebarKeyForThemeRow(t) {
+  const raw = typeof t.category === 'string' ? t.category.trim().toLowerCase() : '';
+  if (raw && THEME_SIDEBAR_KEYS.has(raw)) return raw;
+  const id = String(t.id || '');
+  return THEME_ID_SIDEBAR[id] || 'main';
+}
+
+function slug(s) {
+  return String(s).replace(/[^a-zA-Z0-9_\u0080-\uFFFF-]/g, '_') || '_';
+}
+
+let themesCache = [];
+
+let activeThemeSidebarKey = 'main';
+let themeCascadeListenersBound = false;
+let themeCascadeLayersMounted = false;
+let themeCascadePreviewHoverId = null;
+let themeCascadePositionRaf = 0;
+
 function selectedKbFiles() {
   return Array.from(document.querySelectorAll('.kb-cb:checked')).map((el) => el.value);
 }
@@ -1666,11 +1740,344 @@ async function refreshPromptList() {
   }
 }
 
-let themesCache = [];
+
+function novelThemePayload() {
+  const box = document.getElementById('theme-tags');
+  if (!box) {
+    return { theme_id: 'general', theme_ids: ['general'] };
+  }
+  const checked = [...box.querySelectorAll('input.theme-tag-cb:checked')]
+    .map((i) => i.value)
+    .filter(Boolean);
+  const ids = checked.length ? checked : ['general'];
+  return { theme_id: ids[0], theme_ids: ids };
+}
+
+function ensureMinimumThemeChecked(box) {
+  if (!box) return;
+  const n = box.querySelectorAll('input.theme-tag-cb:checked').length;
+  if (n === 0) {
+    const g = box.querySelector('input.theme-tag-cb[value="general"]');
+    if (g) g.checked = true;
+  }
+}
+
+function syncThemeCascadeNavActive() {
+  const panel = document.getElementById('theme-cascade-panel');
+  if (!panel) return;
+  panel.querySelectorAll('.theme-cat-btn').forEach((btn) => {
+    btn.classList.toggle('is-active', btn.dataset.cat === activeThemeSidebarKey);
+  });
+}
+
+function mountThemeCascadeLayers() {
+  if (themeCascadeLayersMounted) return;
+  const backdrop = document.getElementById('theme-cascade-backdrop');
+  const panel = document.getElementById('theme-cascade-panel');
+  if (!backdrop || !panel) return;
+  document.body.appendChild(backdrop);
+  document.body.appendChild(panel);
+  themeCascadeLayersMounted = true;
+}
+
+function positionThemeCascadePanel() {
+  const trig = document.getElementById('theme-cascade-trigger');
+  const panel = document.getElementById('theme-cascade-panel');
+  if (!trig || !panel || panel.hidden) return;
+  const r = trig.getBoundingClientRect();
+  const margin = 10;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const minW = 288;
+  const width = Math.min(Math.max(minW, r.width), vw - margin * 2);
+
+  let left = Math.round(r.left + (r.width - width) / 2);
+  left = Math.max(margin, Math.min(left, vw - width - margin));
+
+  panel.style.boxSizing = 'border-box';
+  panel.style.width = `${width}px`;
+  panel.style.left = `${left}px`;
+
+  const belowTop = Math.round(r.bottom + 6);
+  panel.style.top = `${belowTop}px`;
+  panel.style.maxHeight = `${Math.floor(Math.max(220, vh - belowTop - margin))}px`;
+
+  requestAnimationFrame(() => {
+    if (panel.hidden) return;
+    const ph = panel.getBoundingClientRect().height;
+    const spaceBelow = vh - r.bottom - margin;
+    const spaceAbove = r.top - margin;
+    let top = belowTop;
+    if (ph > spaceBelow + 12 && spaceAbove > spaceBelow) {
+      top = Math.max(margin, Math.round(r.top - ph - 6));
+    }
+    panel.style.top = `${top}px`;
+    panel.style.maxHeight = `${Math.floor(vh - top - margin)}px`;
+  });
+}
+
+function scheduleThemeCascadePanelPosition() {
+  const panel = document.getElementById('theme-cascade-panel');
+  if (!panel || panel.hidden) return;
+  if (themeCascadePositionRaf) cancelAnimationFrame(themeCascadePositionRaf);
+  themeCascadePositionRaf = requestAnimationFrame(() => {
+    themeCascadePositionRaf = 0;
+    positionThemeCascadePanel();
+  });
+}
+
+function refreshThemeCascadePreview() {
+  const wrap = document.getElementById('theme-cascade-preview');
+  const panel = document.getElementById('theme-cascade-panel');
+  if (!wrap || !panel || panel.hidden) return;
+
+  wrap.innerHTML = '';
+  let titleText = '';
+  let bodyText = '';
+  if (themeCascadePreviewHoverId) {
+    const t = themesCache.find((x) => x.id === themeCascadePreviewHoverId);
+    titleText = t?.label || themeCascadePreviewHoverId;
+    bodyText =
+      (t?.description || '').trim() ||
+      '暂无简介；仍可与其它题材叠加，系统会将已选题材的提示约束合并发送。';
+  } else {
+    const { theme_ids } = novelThemePayload();
+    const labels = theme_ids.map((tid) => {
+      const tt = themesCache.find((x) => x.id === tid);
+      return tt?.label || tid;
+    });
+    titleText = `已选 ${theme_ids.length} 项`;
+    const line =
+      labels.length <= 10 ? labels.join('、') : `${labels.slice(0, 10).join('、')} 等`;
+    bodyText = `${line}。
+
+悬停某一标签可看该题材的写作要点。「脑洞程度」在下方单独一项里调节，与题材勾选无关。`;
+  }
+  const strong = document.createElement('strong');
+  strong.textContent = titleText;
+  const span = document.createElement('span');
+  span.className = 'theme-cascade-preview-body';
+  span.style.whiteSpace = 'pre-line';
+  span.style.display = 'block';
+  span.style.marginTop = '0.375rem';
+  span.textContent = bodyText;
+  wrap.appendChild(strong);
+  wrap.appendChild(span);
+}
+
+function renderThemeCascadeGrid(resetHover = false) {
+  const grid = document.getElementById('theme-cascade-grid');
+  const box = document.getElementById('theme-tags');
+  if (!grid || !box) return;
+  const items = themesCache
+    .filter((t) => sidebarKeyForThemeRow(t) === activeThemeSidebarKey)
+    .slice()
+    .sort((a, b) =>
+      String(a.label || a.id || '').localeCompare(String(b.label || b.id || ''), 'zh')
+    );
+  const frag = document.createDocumentFragment();
+  for (const t of items) {
+    const tid = String(t.id);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'theme-tag-tile';
+    btn.dataset.themeId = tid;
+    btn.textContent = String(t.label || tid);
+    const cb = document.getElementById(`theme-sync-${slug(tid)}`);
+    if (cb?.checked) btn.classList.add('is-selected');
+    frag.appendChild(btn);
+  }
+  if (resetHover) themeCascadePreviewHoverId = null;
+  else if (themeCascadePreviewHoverId) {
+    const stillHere = items.some((t) => String(t.id) === themeCascadePreviewHoverId);
+    if (!stillHere) themeCascadePreviewHoverId = null;
+  }
+  grid.innerHTML = '';
+  grid.appendChild(frag);
+  refreshThemeCascadePreview();
+}
+
+function syncThemeCascadeChips() {
+  const wrap = document.getElementById('theme-cascade-chips');
+  const root = document.getElementById('theme-cascade');
+  if (!wrap || !root) return;
+  const { theme_ids } = novelThemePayload();
+  wrap.innerHTML = '';
+  for (const tid of theme_ids) {
+    const t = themesCache.find((x) => x.id === tid);
+    const lab = String(t?.label || tid || '');
+    const chip = document.createElement('span');
+    chip.className = 'theme-chip';
+    const labSpan = document.createElement('span');
+    labSpan.className = 'theme-chip-label';
+    labSpan.textContent = lab;
+    const xbtn = document.createElement('button');
+    xbtn.type = 'button';
+    xbtn.className = 'theme-chip-x';
+    xbtn.textContent = '×';
+    xbtn.dataset.themeId = tid;
+    xbtn.setAttribute('aria-label', `移除 ${lab}`);
+    chip.appendChild(labSpan);
+    chip.appendChild(xbtn);
+    wrap.appendChild(chip);
+  }
+  root.classList.toggle('has-selection', theme_ids.length > 0);
+}
+
+function setThemeCascadePanelOpen(open) {
+  mountThemeCascadeLayers();
+  const panel = document.getElementById('theme-cascade-panel');
+  const backdrop = document.getElementById('theme-cascade-backdrop');
+  const trig = document.getElementById('theme-cascade-trigger');
+  const rootEl = document.getElementById('theme-cascade');
+  const field = document.querySelector('.novel-theme-field');
+  if (!panel || !trig || !rootEl) return;
+
+  if (!open) {
+    themeCascadePreviewHoverId = null;
+  }
+
+  if (backdrop) {
+    backdrop.hidden = !open;
+    backdrop.setAttribute('aria-hidden', open ? 'false' : 'true');
+  }
+
+  panel.hidden = !open;
+  trig.setAttribute('aria-expanded', open ? 'true' : 'false');
+  rootEl.classList.toggle('is-open', open);
+  field?.classList.toggle('is-picker-open', open);
+
+  if (open) {
+    syncThemeCascadeNavActive();
+    renderThemeCascadeGrid(true);
+    scheduleThemeCascadePanelPosition();
+    refreshThemeCascadePreview();
+  }
+}
+
+function toggleThemeCascadePanel() {
+  const panel = document.getElementById('theme-cascade-panel');
+  if (!panel) return;
+  setThemeCascadePanelOpen(!!panel.hidden);
+}
+
+function bindThemeCascadeOnce() {
+  if (themeCascadeListenersBound) return;
+  mountThemeCascadeLayers();
+  const root = document.getElementById('theme-cascade');
+  const trig = document.getElementById('theme-cascade-trigger');
+  const panel = document.getElementById('theme-cascade-panel');
+  const sidebar = panel?.querySelector('.theme-cascade-sidebar');
+  const box = document.getElementById('theme-tags');
+  const chipsWrap = document.getElementById('theme-cascade-chips');
+  const backdrop = document.getElementById('theme-cascade-backdrop');
+  const grid = document.getElementById('theme-cascade-grid');
+  if (!root || !trig || !panel || !sidebar || !box || !chipsWrap || !backdrop) return;
+  themeCascadeListenersBound = true;
+  sidebar.innerHTML = '';
+  for (const [key, lab] of THEME_SIDEBAR_ROWS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'theme-cat-btn';
+    b.dataset.cat = key;
+    b.innerHTML = `<span>${escapeHtml(lab)}</span><span class="chev" aria-hidden="true">›</span>`;
+    sidebar.appendChild(b);
+  }
+  sidebar.addEventListener('click', (e) => {
+    const catBtn = e.target.closest('.theme-cat-btn');
+    if (!catBtn) return;
+    activeThemeSidebarKey = catBtn.dataset.cat || 'main';
+    syncThemeCascadeNavActive();
+    renderThemeCascadeGrid(true);
+    scheduleThemeCascadePanelPosition();
+  });
+  panel.addEventListener('click', (e) => {
+    const tile = e.target.closest('.theme-tag-tile');
+    if (!tile || !tile.dataset.themeId) return;
+    const cb = document.getElementById(`theme-sync-${slug(tile.dataset.themeId)}`);
+    if (!cb) return;
+    cb.checked = !cb.checked;
+    cb.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  trig.addEventListener('click', () => toggleThemeCascadePanel());
+  chipsWrap.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const x = e.target.closest('.theme-chip-x');
+    if (!x || !x.dataset.themeId) return;
+    e.preventDefault();
+    const cb = document.getElementById(`theme-sync-${slug(x.dataset.themeId)}`);
+    if (cb) {
+      cb.checked = false;
+      cb.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  });
+
+  grid?.addEventListener('mouseover', (e) => {
+    const tile = e.target.closest('.theme-tag-tile');
+    const id = tile?.dataset?.themeId;
+    if (!id) return;
+    themeCascadePreviewHoverId = id;
+    refreshThemeCascadePreview();
+  });
+  grid?.addEventListener('mouseleave', () => {
+    const ae = document.activeElement;
+    if (ae?.closest?.('#theme-cascade-grid') && ae.matches('.theme-tag-tile')) return;
+    themeCascadePreviewHoverId = null;
+    refreshThemeCascadePreview();
+  });
+  grid?.addEventListener('focusin', (e) => {
+    const tile = e.target.closest('.theme-tag-tile');
+    if (tile?.dataset.themeId) {
+      themeCascadePreviewHoverId = tile.dataset.themeId;
+      refreshThemeCascadePreview();
+    }
+  });
+
+  panel.addEventListener('focusout', (e) => {
+    if (!root.classList.contains('is-open')) return;
+    const next = e.relatedTarget;
+    if (next && panel.contains(next)) return;
+    themeCascadePreviewHoverId = null;
+    refreshThemeCascadePreview();
+  });
+
+  /** 打开时：点在面板内或主题输入条上保持；其余任意处关闭（含半透明遮罩后方视觉上「透明」区域） */
+  function themePickerShouldStayOpenForTarget(t) {
+    if (!t || !(t instanceof Element)) return false;
+    if (panel.contains(t)) return true;
+    if (t.closest('#theme-cascade')) return true;
+    return false;
+  }
+
+  function dismissThemePickerIfOutside(e) {
+    if (!root.classList.contains('is-open') || panel.hidden) return;
+    if (themePickerShouldStayOpenForTarget(e.target)) return;
+    setThemeCascadePanelOpen(false);
+  }
+
+  document.addEventListener('mousedown', dismissThemePickerIfOutside, true);
+  document.addEventListener('touchstart', dismissThemePickerIfOutside, { capture: true, passive: true });
+
+  box.addEventListener('change', () => {
+    ensureMinimumThemeChecked(box);
+    syncThemeCascadeChips();
+    if (!panel.hidden) {
+      renderThemeCascadeGrid(false);
+    }
+    updateThemeDesc();
+  });
+  window.addEventListener('resize', scheduleThemeCascadePanelPosition);
+  window.addEventListener('scroll', scheduleThemeCascadePanelPosition, true);
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (root.classList.contains('is-open')) setThemeCascadePanelOpen(false);
+  });
+}
 
 async function refreshThemes() {
-  const sel = document.getElementById('theme-id');
-  if (!sel) return;
+  const box = document.getElementById('theme-tags');
+  if (!box) return;
   let list = [];
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
@@ -1685,22 +2092,39 @@ async function refreshThemes() {
     await new Promise((r) => setTimeout(r, 280 * (attempt + 1)));
   }
   themesCache = list.length > 0 ? list : FALLBACK_THEMES;
-  sel.innerHTML = '';
+  bindThemeCascadeOnce();
+  box.innerHTML = '';
   for (const t of themesCache) {
-    const o = document.createElement('option');
-    o.value = t.id;
-    o.textContent = t.label || t.id;
-    sel.appendChild(o);
+    const tid = String(t.id);
+    const inp = document.createElement('input');
+    inp.type = 'checkbox';
+    inp.className = 'theme-tag-cb';
+    inp.value = tid;
+    inp.name = 'novel_theme';
+    inp.id = `theme-sync-${slug(tid)}`;
+    inp.checked = tid === 'general';
+    box.appendChild(inp);
   }
+  activeThemeSidebarKey = 'main';
+  setThemeCascadePanelOpen(false);
+  syncThemeCascadeNavActive();
+  syncThemeCascadeChips();
+  renderThemeCascadeGrid(true);
   updateThemeDesc();
 }
 
 function updateThemeDesc() {
   const el = document.getElementById('theme-desc');
-  const id = document.getElementById('theme-id')?.value;
   if (!el) return;
-  const t = themesCache.find((x) => x.id === id);
-  el.textContent = t?.description || '';
+  const { theme_ids } = novelThemePayload();
+  const bits = [];
+  for (const tid of theme_ids) {
+    const t = themesCache.find((x) => x.id === tid);
+    const d = t?.description;
+    if (d) bits.push(`${t.label || tid} — ${d}`);
+    else if (t?.label) bits.push(t.label);
+  }
+  el.textContent = bits.join(' ');
 }
 
 async function refreshRollup() {
@@ -2029,8 +2453,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   await refreshMemList();
   await refreshSeriesList();
 
-  document.getElementById('theme-id')?.addEventListener('change', () => updateThemeDesc());
-
   document.getElementById('btn-refresh-series')?.addEventListener('click', () => {
     refreshSeriesList();
   });
@@ -2082,7 +2504,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const bookNote = document.getElementById('solo-book-note')?.value?.trim();
     const payload = {
       title,
-      theme_id: document.getElementById('theme-id')?.value,
+      ...novelThemePayload(),
       ideation_level: readIdeationLevel(),
       max_chapters: maxChapters,
       length_scale: lengthScale,
@@ -2265,7 +2687,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (gs) gs.textContent = '续写进行中…';
     try {
       const basePayload = {
-        theme_id: document.getElementById('theme-id')?.value,
+        ...novelThemePayload(),
         ideation_level: readIdeationLevel(),
         use_long_memory: document.getElementById('cb-continue-memory')?.checked ?? true,
         kb_names: selectedKbFiles(),
@@ -2375,7 +2797,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const payload = {
         book_id: raw.slice(5),
         chapter_index,
-        theme_id: document.getElementById('theme-id')?.value,
+        ...novelThemePayload(),
         ideation_level: readIdeationLevel(),
         use_long_memory: document.getElementById('cb-rewrite-memory')?.checked ?? true,
         kb_names: selectedKbFiles(),
@@ -2622,7 +3044,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         body: JSON.stringify({
           premise,
           temperature: 0.7,
-          theme_id: document.getElementById('theme-id').value,
+          ...novelThemePayload(),
           ideation_level: readIdeationLevel()
         })
       });
@@ -2651,7 +3073,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           kb_names: selectedKbFiles(),
           temperature: 0.8,
           stream: false,
-          theme_id: document.getElementById('theme-id').value,
+          ...novelThemePayload(),
           ideation_level: readIdeationLevel(),
           use_long_memory: document.getElementById('cb-long-memory').checked,
           memory_max_chars: 4500

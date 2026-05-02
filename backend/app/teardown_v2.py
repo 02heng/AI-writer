@@ -11,8 +11,39 @@ from typing import Any, Optional
 
 from .core.logging import get_logger
 from .llm import chat_completion
+from .text_sanitize import prose_ascii_double_quotes_to_single
 
 logger = get_logger(__name__)
+
+# 与虚拟作者 card 使用同一套引号规范，便于蒸馏结果写入 meta/plan 后不炸 JSON
+distill_storage_normalize_quotes = prose_ascii_double_quotes_to_single
+
+
+def normalize_existing_distill_markdowns(root: Path) -> dict[str, int]:
+    """遍历 UserData/author_distills 下已保存的 *.md，就地改写引号。返回 {"files": n, "skipped": m}。"""
+    base = root / AUTHOR_DISTILLS_DIR
+    if not base.is_dir():
+        return {"files": 0, "skipped": 0}
+    updated = 0
+    skipped = 0
+    for p in sorted(base.rglob("*.md")):
+        if not p.is_file():
+            continue
+        try:
+            raw = p.read_text(encoding="utf-8")
+        except OSError:
+            skipped += 1
+            continue
+        norm = distill_storage_normalize_quotes(raw)
+        if norm == raw:
+            skipped += 1
+            continue
+        try:
+            p.write_text(norm, encoding="utf-8")
+            updated += 1
+        except OSError:
+            skipped += 1
+    return {"files": updated, "skipped": skipped}
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +140,8 @@ def build_author_distill_system() -> str:
         "情感基调：<此作者作品的情感底色>\n"
         "```\n\n"
         "不要输出 JSON，不要复述原作情节大段内容。\n"
+        "正文、举例与引语中禁止使用英文直双引号 \" 与弯双引号 “ ”；"
+        "如需引号一律用英文单引号 ' 或中文直角引号「」。\n"
     )
 
 
@@ -118,6 +151,7 @@ def build_author_skill_template(
     book_title: str = "",
 ) -> str:
     """从蒸馏结果生成一个独立的 SKILL.md 内容。"""
+    distill_text = distill_storage_normalize_quotes(distill_text)
     # 提取虚拟作者人设卡片
     card_match = re.search(
         r"【虚拟作者[·.]蒸馏画像】[\s\S]*?(?=\n##|\n---|\Z)",
@@ -174,7 +208,7 @@ def build_author_skill_template(
         f"- 若用户全书项目说明与本 SKILL 冲突，以用户说明为准\n"
         f"- 本 SKILL 可与主题（theme）叠加使用\n"
     )
-    return skill_md
+    return distill_storage_normalize_quotes(skill_md)
 
 
 def _slugify(name: str) -> str:
@@ -350,16 +384,17 @@ def distill_author(
     except Exception as e:
         return {"ok": False, "error": f"模型调用失败: {e}"}
 
+    norm_text = distill_storage_normalize_quotes(text.strip())
     # 生成 SKILL.md 内容
     skill_content = build_author_skill_template(
         author_name=author_name or "未知作者",
-        distill_text=text.strip(),
+        distill_text=norm_text,
         book_title=book_title,
     )
 
     return {
         "ok": True,
-        "distill_text": text.strip(),
+        "distill_text": norm_text,
         "skill_content": skill_content,
         "author_name": author_name or "未知作者",
     }
@@ -404,6 +439,8 @@ def save_distill_record(
     skill_content: str,
 ) -> dict[str, Any]:
     """保存一次蒸馏结果到历史记录。返回记录元数据。"""
+    distill_text = distill_storage_normalize_quotes(distill_text)
+    skill_content = distill_storage_normalize_quotes(skill_content)
     record_id = uuid.uuid4().hex[:12]
     ts = time.time()
 
@@ -440,6 +477,8 @@ def save_merged_distill_record(
     source_record_ids: list[str],
 ) -> dict[str, Any]:
     """保存合并蒸馏结果，替换已有的合并记录。"""
+    merged_text = distill_storage_normalize_quotes(merged_text)
+    skill_content = distill_storage_normalize_quotes(skill_content)
     record_id = uuid.uuid4().hex[:12]
     ts = time.time()
 
@@ -524,6 +563,7 @@ def build_merge_distill_system() -> str:
         "- 每个维度注明「综合自 N 篇作品」\n"
         "- 末尾生成合并后的**虚拟作者人设卡片**\n"
         "- 不要输出 JSON\n"
+        "- 禁止使用英文直双引号 \" 与弯双引号 “ ”；引号一律用 ' 或 「」。\n"
     )
 
 
@@ -539,15 +579,15 @@ def merge_distill_reports(
         return {"ok": False, "error": "没有可合并的蒸馏报告"}
 
     if len(distill_texts) == 1:
-        # 只有一篇，直接返回
+        one = distill_storage_normalize_quotes(distill_texts[0])
         skill_content = build_author_skill_template(
             author_name=author_name,
-            distill_text=distill_texts[0],
+            distill_text=one,
             book_title=book_titles[0] if book_titles else "",
         )
         return {
             "ok": True,
-            "merged_text": distill_texts[0],
+            "merged_text": one,
             "skill_content": skill_content,
             "author_name": author_name,
             "merged_count": 1,
@@ -577,15 +617,16 @@ def merge_distill_reports(
     except Exception as e:
         return {"ok": False, "error": f"模型调用失败: {e}"}
 
+    merged_norm = distill_storage_normalize_quotes(merged_text.strip())
     skill_content = build_author_skill_template(
         author_name=author_name,
-        distill_text=merged_text.strip(),
+        distill_text=merged_norm,
         book_title="、".join(book_titles[:5]),
     )
 
     return {
         "ok": True,
-        "merged_text": merged_text.strip(),
+        "merged_text": merged_norm,
         "skill_content": skill_content,
         "author_name": author_name,
         "merged_count": len(distill_texts),

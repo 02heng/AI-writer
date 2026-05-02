@@ -97,9 +97,47 @@
               </div>
 
               <div class="form-grid">
-                <div class="form-col-span2">
-                  <label class="lbl lbl-strong" for="theme-id">小说题材 / 类型</label>
-                  <select id="theme-id" class="inp inp-select"></select>
+                <div class="form-col-span2 novel-theme-field">
+                  <span id="novel-theme-label" class="lbl lbl-strong">作品分类（可多选）</span>
+                  <div id="theme-cascade" class="theme-cascade">
+                    <button
+                      type="button"
+                      id="theme-cascade-trigger"
+                      class="theme-cascade-trigger inp"
+                      aria-expanded="false"
+                      aria-haspopup="dialog"
+                      aria-controls="theme-cascade-panel"
+                      aria-labelledby="novel-theme-label"
+                    >
+                      <span class="theme-cascade-trigger-inner">
+                        <span class="theme-cascade-chips" id="theme-cascade-chips" aria-live="polite"></span>
+                        <span class="theme-cascade-placeholder" id="theme-cascade-placeholder">请选择题材标签</span>
+                      </span>
+                      <span class="theme-cascade-chevron" aria-hidden="true"></span>
+                    </button>
+                    <div
+                      id="theme-cascade-panel"
+                      class="theme-cascade-panel"
+                      hidden
+                      role="dialog"
+                      aria-modal="true"
+                      aria-label="作品分类"
+                    >
+                      <nav class="theme-cascade-sidebar" aria-label="分类维度">
+                        <!-- filled by refreshThemes -->
+                      </nav>
+                      <div class="theme-cascade-body">
+                        <div id="theme-cascade-grid" class="theme-cascade-grid" role="group"></div>
+                        <footer id="theme-cascade-preview" class="theme-cascade-preview" aria-live="polite"></footer>
+                      </div>
+                    </div>
+                  </div>
+                  <div
+                    id="theme-tags"
+                    class="theme-tags-sync"
+                    role="group"
+                    aria-hidden="true"
+                  ></div>
                   <p id="theme-desc" class="theme-blurb"></p>
                 </div>
                 <div class="form-col-span2">
@@ -790,6 +828,13 @@
         </div>
       </div>
     </div>
+
+    <div
+      id="theme-cascade-backdrop"
+      class="theme-cascade-backdrop"
+      hidden
+      aria-hidden="true"
+    ></div>
 
     <script src="md-lite.js"></script>
     <script src="app.js"></script>

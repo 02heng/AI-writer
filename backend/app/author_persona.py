@@ -5,6 +5,8 @@ from __future__ import annotations
 import random
 from typing import Any, Optional
 
+from .text_sanitize import prose_ascii_double_quotes_to_single
+
 # 叙事滤光：人物欲望与作者内在驱动力同频（内化，非元小说直写）
 WRITER_VOICE_PHILOSOPHY = (
     "【叙事滤光（须内化，勿在正文直说）】\n"
@@ -128,6 +130,7 @@ def roll_virtual_author(rng: Optional[random.Random] = None) -> dict[str, Any]:
         f"说明：{pronoun}是本书的「笔法滤光镜」——书中人物的欲望与执着应与此作者的内在驱动力隐隐同频；"
         f"正文勿直写作者本人，除非用户或合同要求。"
     )
+    card = prose_ascii_double_quotes_to_single(card)
     return {
         "gender": gender,
         "pronoun": pronoun,
@@ -149,7 +152,8 @@ def build_voice_prompt_blocks(
     if note:
         parts.append("【用户全书项目说明（须尊重、可内化）】\n" + note[:6000])
     if author and isinstance(author, dict) and str(author.get("card") or "").strip():
-        parts.append(str(author["card"]).strip()[:8000])
+        card_txt = prose_ascii_double_quotes_to_single(str(author["card"]).strip())[:8000]
+        parts.append(card_txt)
     if note and author and isinstance(author, dict) and str(author.get("card") or "").strip():
         parts.append(
             "【滤光优先级】若虚拟作者人格与用户全书项目说明在基调、禁忌或主线取舍上冲突，以用户全书项目说明为准。"

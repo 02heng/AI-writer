@@ -356,3 +356,95 @@ def theme_by_id(themes: list[dict[str, Any]], theme_id: Optional[str]) -> Option
         if t.get("id") == theme_id:
             return t
     return None
+
+
+_MAX_THEME_TAGS = 14
+
+
+def normalize_theme_id_list(
+    themes: list[dict[str, Any]],
+    *,
+    theme_ids: Optional[list[str]] = None,
+    theme_id: Optional[str] = None,
+) -> list[str]:
+    """去重并保持顺序；仅保留 themes 中存在的 id；若全无则退回 theme_id / general。"""
+    known = {str(t.get("id") or "").strip().lower() for t in themes if t.get("id")}
+    out: list[str] = []
+    seen: set[str] = set()
+    if theme_ids:
+        for x in theme_ids:
+            tid = str(x or "").strip().lower()
+            if not tid or tid not in known or tid in seen:
+                continue
+            seen.add(tid)
+            out.append(tid)
+            if len(out) >= _MAX_THEME_TAGS:
+                break
+    if not out:
+        one = str(theme_id or "general").strip().lower()
+        if one not in known:
+            one = "general"
+        out = [one]
+    return out
+
+
+def compose_merged_system_addon(themes: list[dict[str, Any]], ids: list[str]) -> str:
+    """按顺序合并多个题材的 system_addon，跳过空串与完全相同段落。"""
+    parts: list[str] = []
+    seen_text: set[str] = set()
+    for tid in ids:
+        row = theme_by_id(themes, tid)
+        if not row:
+            continue
+        a = str(row.get("system_addon") or "").strip()
+        if not a or a in seen_text:
+            continue
+        seen_text.add(a)
+        parts.append(a)
+    return "\n\n".join(parts)
+
+
+def compose_outline_theme_hints(themes: list[dict[str, Any]], ids: list[str]) -> str:
+    """策划/大纲用：多题材的标签与简述。"""
+    lines: list[str] = []
+    for tid in ids:
+        th = theme_by_id(themes, tid)
+        if not th:
+            continue
+        label = str(th.get("label") or tid).strip()
+        desc = str(th.get("description") or "").strip()
+        if label and desc:
+            lines.append(f"{label}：{desc}")
+        elif label:
+            lines.append(label)
+    return " ".join(lines).strip()
+
+
+def resolve_story_theme_ids(
+    plan_data: Optional[dict[str, Any]],
+    themes: list[dict[str, Any]],
+    *,
+    request_theme_ids: Optional[list[str]] = None,
+    request_theme_id: Optional[str] = None,
+) -> list[str]:
+    """续写 / 重写：plan.meta.theme_ids → theme_id → 请求多选 → 请求单选。"""
+    if isinstance(plan_data, dict):
+        meta = plan_data.get("meta")
+        if isinstance(meta, dict):
+            raw = meta.get("theme_ids")
+            if isinstance(raw, list) and raw:
+                out: list[str] = []
+                seen: set[str] = set()
+                for x in raw:
+                    tid = str(x or "").strip().lower()
+                    if tid and tid not in seen:
+                        seen.add(tid)
+                        out.append(tid)
+                if out:
+                    return normalize_theme_id_list(themes, theme_ids=out, theme_id=None)
+            tmeta = str(meta.get("theme_id") or "").strip().lower()
+            if tmeta:
+                return normalize_theme_id_list(themes, theme_ids=None, theme_id=tmeta)
+    return normalize_theme_id_list(
+        themes, theme_ids=request_theme_ids, theme_id=request_theme_id
+    )

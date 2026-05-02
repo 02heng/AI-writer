@@ -23,6 +23,7 @@ from .book_storage import (
     export_book_plain_text,
     get_chapter_numbers,
     get_meta,
+    get_plan,
     get_toc,
     list_books_slice,
     list_trashed_books_slice,
@@ -55,12 +56,15 @@ from .pipeline import (
 from .memory_store import (
     add_entry,
     build_memory_context,
+    compose_merged_system_addon,
+    compose_outline_theme_hints,
     delete_entry,
     init_db,
     list_entries,
     load_themes,
+    normalize_theme_id_list,
     read_rollup,
-    theme_by_id,
+    resolve_story_theme_ids,
     write_rollup,
 )
 from .character_profiles import (
@@ -86,10 +90,12 @@ from .paths import analytics_root, ensure_layout, snapshots_library_dir, user_da
 from .teardown import build_oh_story_long_analyze_system, teardown_framework_ok
 from .teardown_v2 import (
     distill_author,
+    distill_storage_normalize_quotes,
     list_distill_records,
     list_all_distill_authors,
     match_themes_by_tags,
     merge_distill_reports,
+    normalize_existing_distill_markdowns,
     read_distill_detail,
     save_distill_record,
     save_merged_distill_record,
@@ -189,6 +195,10 @@ class GenerateBody(BaseModel):
     temperature: float = Field(default=0.8, ge=0, le=2)
     stream: bool = False
     theme_id: Optional[str] = Field(default="general", description="小说主题/类型")
+    theme_ids: Optional[list[str]] = Field(
+        default=None,
+        description="多选题材 id；为空则仅用 theme_id",
+    )
     ideation_level: float = Field(
         default=0.5,
         ge=0,
@@ -203,6 +213,10 @@ class OutlineBody(BaseModel):
     premise: str = Field(..., min_length=1)
     temperature: float = Field(default=0.7, ge=0, le=2)
     theme_id: Optional[str] = Field(default="general")
+    theme_ids: Optional[list[str]] = Field(
+        default=None,
+        description="多选题材；与 theme_id 合并规范化",
+    )
     ideation_level: float = Field(
         default=0.5,
         ge=0,
@@ -292,6 +306,10 @@ class PipelineFromTitleBody(BaseModel):
 
     title: str = Field(..., min_length=1, max_length=200)
     theme_id: Optional[str] = Field(default="general")
+    theme_ids: Optional[list[str]] = Field(
+        default=None,
+        description="多选题材 id；为空则仅用 theme_id",
+    )
     max_chapters: int = Field(default=8, ge=3, le=MAX_PIPELINE_CHAPTERS)
     planned_total_chapters: Optional[int] = Field(
         default=None,
@@ -372,6 +390,10 @@ class PipelineContinueBody(BaseModel):
     book_id: Optional[str] = Field(default=None, max_length=32)
     series_prefix: Optional[str] = Field(default=None, max_length=80)
     theme_id: Optional[str] = Field(default="general")
+    theme_ids: Optional[list[str]] = Field(
+        default=None,
+        description="多选叠加（书本已存题材仍优先）",
+    )
     use_long_memory: bool = Field(default=True)
     kb_names: list[str] = Field(default_factory=list)
     writing_temperature: float = Field(default=0.82, ge=0, le=2)
@@ -437,6 +459,10 @@ class PipelineRewriteChapterBody(BaseModel):
         description="要重写的章号；省略则重写当前磁盘上最后一章",
     )
     theme_id: Optional[str] = Field(default="general")
+    theme_ids: Optional[list[str]] = Field(
+        default=None,
+        description="多选叠加（书本已存题材仍优先）",
+    )
     use_long_memory: bool = Field(default=True)
     kb_names: list[str] = Field(default_factory=list)
     writing_temperature: float = Field(default=0.82, ge=0, le=2)
@@ -528,13 +554,26 @@ def _kb_context_only(kb_names: list[str]) -> str:
     return "\n\n".join(parts).strip()
 
 
-def _compose_system(base_system: str, theme_id: Optional[str]) -> str:
-    t = theme_by_id(THEMES, theme_id or "general")
-    addon = (t or {}).get("system_addon") or ""
-    addon = str(addon).strip()
+def _compose_system(
+    base_system: str,
+    theme_id: Optional[str] = None,
+    *,
+    theme_ids: Optional[list[str]] = None,
+) -> str:
+    ids = normalize_theme_id_list(THEMES, theme_ids=theme_ids, theme_id=theme_id)
+    addon = compose_merged_system_addon(THEMES, ids).strip()
     if not addon:
         return base_system
     return f"{base_system.strip()}\n\n【题材约束】\n{addon}"
+
+
+def _normalized_theme_addon_and_ids(
+    *,
+    theme_id: Optional[str],
+    theme_ids: Optional[list[str]],
+) -> tuple[str, list[str]]:
+    ids = normalize_theme_id_list(THEMES, theme_ids=theme_ids, theme_id=theme_id)
+    return compose_merged_system_addon(THEMES, ids).strip(), ids
 
 
 # 递增：Electron 启动时用于识别「本机 18765 上是否为当前应用的后端」，避免旧版/他进程占位导致 404。
@@ -739,7 +778,14 @@ def api_distill_detail(author_name: str, record_id: str):
     text = read_distill_detail(ROOT, author_name, record_id)
     if not text:
         raise HTTPException(404, "记录不存在或文件已丢失")
-    return {"text": text}
+    return {"text": distill_storage_normalize_quotes(text)}
+
+
+@app.post("/api/teardown/repair-distill-quotes")
+def api_teardown_repair_distill_quotes():
+    """将 author_distills 下已保存的 *.md 中双引号规范为单引号（就地改写）。"""
+    stats = normalize_existing_distill_markdowns(ROOT)
+    return {"ok": True, **stats}
 
 
 class MergeDistillBody(BaseModel):
@@ -792,7 +838,7 @@ def api_merge_distill(body: MergeDistillBody):
         merged_record = save_merged_distill_record(
             ROOT,
             author_name=author_name,
-            merged_text=result.get("distill_text", ""),
+            merged_text=result.get("merged_text", ""),
             skill_content=result.get("skill_content", ""),
             source_record_ids=body.record_ids,
         )
@@ -850,7 +896,7 @@ def api_teardown_save_skill(body: KbWriteBody):
     kb_dir.mkdir(parents=True, exist_ok=True)
     out = kb_dir / safe
     try:
-        out.write_text(body.content or "", encoding="utf-8")
+        out.write_text(distill_storage_normalize_quotes(body.content or ""), encoding="utf-8")
     except OSError as e:
         raise HTTPException(500, f"写入 SKILL 失败: {e}") from e
     return {"ok": True, "name": safe, "path": str(out)}
@@ -1102,7 +1148,7 @@ def _resolve_distilled_author_card(author_name: Optional[str]) -> Optional[str]:
                     try:
                         text = p.read_text(encoding="utf-8", errors="replace")
                         if text.strip():
-                            return text
+                            return distill_storage_normalize_quotes(text)
                     except OSError:
                         pass
     # 无合并记录：只有一条则直接返回，多条不自动合并（太大）
@@ -1115,7 +1161,7 @@ def _resolve_distilled_author_card(author_name: Optional[str]) -> Optional[str]:
                     try:
                         text = p.read_text(encoding="utf-8", errors="replace")
                         if text.strip():
-                            return text
+                            return distill_storage_normalize_quotes(text)
                     except OSError:
                         pass
     return None
@@ -1127,8 +1173,9 @@ def pipeline_from_title(body: PipelineFromTitleBody):
     writer_system = _read_text(writer_path)
     if not writer_system.strip():
         raise HTTPException(400, "缺少或空的 prompts/writer.md")
-    th = theme_by_id(THEMES, body.theme_id or "general")
-    theme_addon = str((th or {}).get("system_addon") or "")
+    theme_addon, merged_ids = _normalized_theme_addon_and_ids(
+        theme_id=body.theme_id, theme_ids=body.theme_ids
+    )
     kb_block = _kb_context_only(body.kb_names)
     mem_global = ""
     if body.use_long_memory:
@@ -1172,7 +1219,8 @@ def pipeline_from_title(body: PipelineFromTitleBody):
                 else None
             ),
             foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
-            theme_id=str(body.theme_id or "general"),
+            theme_id=merged_ids[0],
+            theme_ids_selected=merged_ids,
             distilled_author_card=distilled_card,
         )
     except HTTPException:
@@ -1188,8 +1236,9 @@ async def pipeline_from_title_stream(body: PipelineFromTitleBody):
     writer_system = _read_text(writer_path)
     if not writer_system.strip():
         raise HTTPException(400, "缺少或空的 prompts/writer.md")
-    th = theme_by_id(THEMES, body.theme_id or "general")
-    theme_addon = str((th or {}).get("system_addon") or "")
+    theme_addon, merged_ids = _normalized_theme_addon_and_ids(
+        theme_id=body.theme_id, theme_ids=body.theme_ids
+    )
     kb_block = _kb_context_only(body.kb_names)
     mem_global = ""
     if body.use_long_memory:
@@ -1243,7 +1292,8 @@ async def pipeline_from_title_stream(body: PipelineFromTitleBody):
                         else None
                     ),
                     foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
-                    theme_id=str(body.theme_id or "general"),
+                    theme_id=merged_ids[0],
+                    theme_ids_selected=merged_ids,
                     distilled_author_card=distilled_card,
                 )
                 q.put(("done", r))
@@ -1289,8 +1339,6 @@ def pipeline_continue(body: PipelineContinueBody):
     writer_system = _read_text(writer_path)
     if not writer_system.strip():
         raise HTTPException(400, "缺少或空的 prompts/writer.md")
-    th = theme_by_id(THEMES, body.theme_id or "general")
-    theme_addon = str((th or {}).get("system_addon") or "")
     kb_block = _kb_context_only(body.kb_names)
     mem_global = ""
     if body.use_long_memory:
@@ -1305,6 +1353,14 @@ def pipeline_continue(body: PipelineContinueBody):
     distilled_card = _resolve_distilled_author_card(body.distilled_author_name)
     try:
         if bid:
+            plan_ct = get_plan(ROOT, bid)
+            merged_ct = resolve_story_theme_ids(
+                plan_ct,
+                THEMES,
+                request_theme_ids=body.theme_ids,
+                request_theme_id=body.theme_id,
+            )
+            theme_addon = compose_merged_system_addon(THEMES, merged_ct).strip()
             cnt = max(1, min(int(body.chapter_count or 1), MAX_CONTINUE_CHAPTERS))
             if cnt > 1:
                 result = run_continue_chapters(
@@ -1328,6 +1384,7 @@ def pipeline_continue(body: PipelineContinueBody):
                     memory_episodic_keep_last=episodic_keep,
                     foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
                     theme_id=str(body.theme_id or "general"),
+                    request_theme_ids=body.theme_ids,
                     distilled_author_card=distilled_card,
                 )
             else:
@@ -1350,9 +1407,16 @@ def pipeline_continue(body: PipelineContinueBody):
                     memory_episodic_keep_last=episodic_keep,
                     foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
                     theme_id=str(body.theme_id or "general"),
+                    request_theme_ids=body.theme_ids,
                     distilled_author_card=distilled_card,
                 )
         elif sp:
+            merged_sp = normalize_theme_id_list(
+                THEMES,
+                theme_ids=body.theme_ids,
+                theme_id=body.theme_id,
+            )
+            theme_addon = compose_merged_system_addon(THEMES, merged_sp).strip()
             prefix = safe_series_prefix(sp)
             result = run_continue_next_chapter_legacy_out(
                 root=ROOT,
@@ -1368,6 +1432,7 @@ def pipeline_continue(body: PipelineContinueBody):
                 run_reader_test=bool(body.run_reader_test),
                 run_reader_driven_revision=bool(body.run_reader_driven_revision),
                 theme_id=str(body.theme_id or "general"),
+                request_theme_ids=body.theme_ids,
             )
         else:
             raise HTTPException(400, "请提供 book_id（推荐）或 series_prefix（旧书库）")
@@ -1385,8 +1450,6 @@ def pipeline_rewrite_chapter(body: PipelineRewriteChapterBody):
     writer_system = _read_text(writer_path)
     if not writer_system.strip():
         raise HTTPException(400, "缺少或空的 prompts/writer.md")
-    th = theme_by_id(THEMES, body.theme_id or "general")
-    theme_addon = str((th or {}).get("system_addon") or "")
     kb_block = _kb_context_only(body.kb_names)
     mem_global = ""
     if body.use_long_memory:
@@ -1400,6 +1463,14 @@ def pipeline_rewrite_chapter(body: PipelineRewriteChapterBody):
     mek = int(body.memory_episodic_keep_last or 0)
     episodic_keep = mek if mek > 0 else None
     distilled_card = _resolve_distilled_author_card(body.distilled_author_name)
+    plan_rw = get_plan(ROOT, bid)
+    merged_rw = resolve_story_theme_ids(
+        plan_rw,
+        THEMES,
+        request_theme_ids=body.theme_ids,
+        request_theme_id=body.theme_id,
+    )
+    theme_addon = compose_merged_system_addon(THEMES, merged_rw).strip()
     try:
         return run_rewrite_chapter(
             root=ROOT,
@@ -1421,6 +1492,7 @@ def pipeline_rewrite_chapter(body: PipelineRewriteChapterBody):
             memory_episodic_keep_last=episodic_keep,
             foreshadowing_sync_after_chapter=bool(body.foreshadowing_sync_after_chapter),
             theme_id=str(body.theme_id or "general"),
+            request_theme_ids=body.theme_ids,
             rewrite_author_note=body.rewrite_author_note,
             distilled_author_card=distilled_card,
         )
@@ -1497,7 +1569,7 @@ def generate(body: GenerateBody):
     if not system:
         raise HTTPException(400, f"找不到或未读取到提示词: {body.prompt_name}")
 
-    system = _compose_system(system, body.theme_id)
+    system = _compose_system(system, body.theme_id, theme_ids=body.theme_ids)
 
     user_full = _build_user_with_kb(body.user_message, body.kb_names)
     user_full = ideation_instruction(body.ideation_level) + "\n\n---\n\n" + user_full
@@ -1535,10 +1607,10 @@ def generate(body: GenerateBody):
 
 @app.post("/api/outline")
 def outline(body: OutlineBody):
-    th = theme_by_id(THEMES, body.theme_id or "general")
-    theme_hint = ""
-    if th and (th.get("label") or th.get("description")):
-        theme_hint = f"题材类型：{th.get('label','')}。{th.get('description','')}".strip()
+    ids = normalize_theme_id_list(THEMES, theme_ids=body.theme_ids, theme_id=body.theme_id)
+    theme_hint = compose_outline_theme_hints(THEMES, ids)
+    if theme_hint:
+        theme_hint = f"题材说明（可多选）：{theme_hint}"
 
     sys_prompt = (
         "你是中文小说策划。根据用户一句话梗概，输出简洁分章大纲（8～15 章），"

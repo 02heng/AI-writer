@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -12,7 +13,25 @@ from typing import Any, Optional
 from fastapi import HTTPException
 
 from .memory_store import init_db as init_memory_db
-from .text_sanitize import strip_aiwriter_prose_noise, strip_markdown_double_asterisk_bold
+from .text_sanitize import (
+    prose_ascii_double_quotes_to_single,
+    strip_aiwriter_prose_noise,
+    strip_markdown_double_asterisk_bold,
+)
+
+_logger = logging.getLogger(__name__)
+
+
+def _sanitize_virtual_author_card_in_meta(meta: Any) -> None:
+    """就地规范化 meta['virtual_author']['card'] 中的双引号类字符。"""
+    if not isinstance(meta, dict):
+        return
+    va = meta.get("virtual_author")
+    if not isinstance(va, dict):
+        return
+    c = va.get("card")
+    if isinstance(c, str) and c:
+        va["card"] = prose_ascii_double_quotes_to_single(c)
 
 
 def books_root(data_root: Path) -> Path:
@@ -80,6 +99,10 @@ def create_book(
     }
     if meta_extra:
         meta.update(meta_extra)
+    _sanitize_virtual_author_card_in_meta(meta)
+    pm = plan.get("meta") if isinstance(plan.get("meta"), dict) else None
+    if pm is not None:
+        _sanitize_virtual_author_card_in_meta(pm)
     (root / "meta.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -203,15 +226,51 @@ def get_meta(data_root: Path, book_id: str) -> dict[str, Any]:
 
 def save_meta(data_root: Path, book_id: str, meta: dict[str, Any]) -> None:
     """覆写 meta.json（保留 book_id 字段）。"""
+    _sanitize_virtual_author_card_in_meta(meta)
     mp = book_dir(data_root, book_id) / "meta.json"
     mp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _minimal_plan_from_meta(data_root: Path, book_id: str) -> dict[str, Any]:
+    """plan.json 不可解析时使用：结构与正常 plan 对齐，章节表为空则由续写链路现推 beat / 或弧规划重写 plan。"""
+    meta = get_meta(data_root, book_id)
+    sub: dict[str, Any] = {}
+    for k in (
+        "ideation_level",
+        "length_scale",
+        "user_book_note",
+        "theme_id",
+        "theme_ids",
+        "planned_total_chapters",
+    ):
+        v = meta.get(k)
+        if v is not None and str(v).strip() != "":
+            sub[k] = v
+    title = str(meta.get("title") or book_id)
+    return {
+        "premise": str(meta.get("premise") or ""),
+        "book_title": title,
+        "title": title,
+        "chapters": [],
+        "meta": sub,
+    }
 
 
 def get_plan(data_root: Path, book_id: str) -> dict[str, Any]:
     pp = book_dir(data_root, book_id) / "plan.json"
     if not pp.is_file():
         raise HTTPException(404, "缺少 plan.json")
-    return json.loads(pp.read_text(encoding="utf-8"))
+    try:
+        return json.loads(pp.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        _logger.warning(
+            "plan.json JSON 损坏，已用 meta 合成最小结构: book=%s msg=%s line=%s col=%s",
+            book_id,
+            e.msg,
+            getattr(e, "lineno", "?"),
+            getattr(e, "colno", "?"),
+        )
+        return _minimal_plan_from_meta(data_root, book_id)
 
 
 def clean_stored_chapter_text(text: str) -> str:
@@ -323,6 +382,9 @@ def write_chapter(data_root: Path, book_id: str, chapter_n: int, content: str) -
 
 def update_plan(data_root: Path, book_id: str, plan: dict[str, Any]) -> None:
     book_dir(data_root, book_id)
+    pm = plan.get("meta")
+    if isinstance(pm, dict):
+        _sanitize_virtual_author_card_in_meta(pm)
     p = book_dir(data_root, book_id) / "plan.json"
     p.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
     _touch_book_index(data_root, book_id)

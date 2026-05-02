@@ -28,6 +28,7 @@ from .book_storage import (
 from .core.logging import get_logger, LogContext
 from .jsonutil import extract_json_object
 from .text_sanitize import (
+    prose_ascii_double_quotes_to_single,
     relax_runon_cjk_prose_to_paragraphs,
     strip_aiwriter_prose_noise,
     strip_common_prefix_with_previous_opening,
@@ -49,6 +50,8 @@ from .memory_store import (
     init_db,
     prune_episodic_extraction_entries,
     read_rollup,
+    resolve_story_theme_ids,
+    load_themes,
     write_rollup,
 )
 from .orchestration.runner import (
@@ -77,6 +80,29 @@ from .kb_synthesis import merge_writer_kb_block, refresh_author_bible_synthesis_
 
 logger = get_logger(__name__)
 
+_PIPELINE_THEMES: Optional[list[dict[str, Any]]] = None
+
+
+def _pipeline_themes() -> list[dict[str, Any]]:
+    global _PIPELINE_THEMES
+    if _PIPELINE_THEMES is None:
+        _PIPELINE_THEMES = load_themes(Path(__file__).resolve().parent)
+    return _PIPELINE_THEMES
+
+
+def _theme_ids_for_run(
+    plan_data: Optional[dict[str, Any]],
+    *,
+    request_theme_ids: Optional[list[str]] = None,
+    request_theme_id: Optional[str] = None,
+) -> list[str]:
+    return resolve_story_theme_ids(
+        plan_data if isinstance(plan_data, dict) else None,
+        _pipeline_themes(),
+        request_theme_ids=request_theme_ids,
+        request_theme_id=request_theme_id,
+    )
+
 ProgressCb = Optional[Callable[[dict[str, Any]], None]]
 
 
@@ -90,6 +116,7 @@ def _maybe_refresh_kb_synthesis(
     chapter_plain: str,
     sync_book_memory: bool,
     progress_cb: ProgressCb = None,
+    chapter_was_rewrite: bool = False,
 ) -> None:
     if not sync_book_memory:
         return
@@ -101,6 +128,7 @@ def _maybe_refresh_kb_synthesis(
             chapter_index=chapter_index,
             chapter_title=chapter_title,
             chapter_plain=chapter_plain,
+            chapter_was_rewrite=chapter_was_rewrite,
         )
         if progress_cb and isinstance(r, dict) and r.get("ok"):
             progress_cb({"event": "kb_synthesis", "chapter": chapter_index, "kb_synthesis": r})
@@ -324,6 +352,7 @@ def _plan_macro_scale(
     temperature: float,
     ideation_level: float = 0.5,
     theme_id: Optional[str] = None,
+    theme_ids: Optional[list[str]] = None,
 ) -> tuple[str, str, dict[str, Any]]:
     """两阶策划·宏观：全书总尺度 + 阶段路线图（不生成逐章 beat）。"""
     sys_p = (
@@ -340,7 +369,7 @@ def _plan_macro_scale(
         f"题目：{title.strip()}\n"
         f"全书预定总章数：{planned_total}（必须按此尺度设计阶段跨度）。\n"
         f"本轮将实际生成正文：第 1–{chapters_this_run} 章。\n"
-        f"{_scale_instruction(length_scale, theme_id)}\n{_protagonist_instruction(protagonist_gender)}\n"
+        f"{_scale_instruction(length_scale, theme_id, theme_ids=theme_ids)}\n{_protagonist_instruction(protagonist_gender)}\n"
         f"{ideation_instruction(ideation_level)}\n"
     )
     if theme_hint:
@@ -420,6 +449,7 @@ def _batched_chapter_plan_slices(
     macro_block: str = "",
     ideation_level: float = 0.5,
     theme_id: Optional[str] = None,
+    theme_ids: Optional[list[str]] = None,
 ) -> list[dict[str, Any]]:
     """从第 1 章起分批生成共 n 章的分章要点。"""
     n = max(3, min(int(n), MAX_PIPELINE_CHAPTERS))
@@ -449,6 +479,7 @@ def _batched_chapter_plan_slices(
             macro_block=macro_block,
             ideation_level=ideation_level,
             theme_id=theme_id,
+            theme_ids=theme_ids,
         )
         all_ch.extend(batch)
         start = end + 1
@@ -640,9 +671,11 @@ def _maybe_append_short_story_romance_writer(
     parts: list[str],
     *,
     length_scale: str,
-    theme_id: Optional[str],
+    theme_id: Optional[str] = None,
+    theme_ids: Optional[list[str]] = None,
 ) -> None:
-    if length_scale == "short" and theme_id_is_romance(theme_id):
+    ids = theme_ids if theme_ids else [str(theme_id or "general").strip().lower()]
+    if length_scale == "short" and any(theme_id_is_romance(t) for t in ids):
         parts.append(_short_story_romance_web_instruction())
 
 
@@ -650,13 +683,21 @@ def _maybe_append_short_story_suspense_writer(
     parts: list[str],
     *,
     length_scale: str,
-    theme_id: Optional[str],
+    theme_id: Optional[str] = None,
+    theme_ids: Optional[list[str]] = None,
 ) -> None:
-    if length_scale == "short" and theme_id_is_suspense_horror(theme_id):
+    ids = theme_ids if theme_ids else [str(theme_id or "general").strip().lower()]
+    if length_scale == "short" and any(theme_id_is_suspense_horror(t) for t in ids):
         parts.append(_short_story_suspense_reader_instruction())
 
 
-def _scale_instruction(length_scale: str, theme_id: Optional[str] = None) -> str:
+def _scale_instruction(
+    length_scale: str,
+    theme_id: Optional[str] = None,
+    *,
+    theme_ids: Optional[list[str]] = None,
+) -> str:
+    ids = theme_ids if theme_ids else [str(theme_id or "general").strip().lower()]
     m = {
         "short": "篇幅为短篇：结构紧凑，单线或极少支线，冲突推进快，适合约三万至八万汉字量级的叙事节奏，避免冗长支线。",
         "medium": "篇幅为中篇：可有适度支线与铺陈，节奏介于短篇与长篇之间，注意主线清晰。",
@@ -665,9 +706,9 @@ def _scale_instruction(length_scale: str, theme_id: Optional[str] = None) -> str
     base = m.get(length_scale, m["medium"])
     if length_scale == "short":
         base = base + "\n" + _short_story_reader_engagement_instruction()
-        if theme_id_is_romance(theme_id):
+        if any(theme_id_is_romance(t) for t in ids):
             base = base + "\n" + _short_story_romance_web_instruction()
-        if theme_id_is_suspense_horror(theme_id):
+        if any(theme_id_is_suspense_horror(t) for t in ids):
             base = base + "\n" + _short_story_suspense_reader_instruction()
         return base
     return base
@@ -812,6 +853,7 @@ def _format_chapter_contract(
     is_rewrite: bool = False,
     length_scale: Optional[str] = None,
     theme_id: Optional[str] = None,
+    theme_ids: Optional[list[str]] = None,
 ) -> str:
     if continuation and is_rewrite:
         tail = (
@@ -851,6 +893,9 @@ def _format_chapter_contract(
     sfl = str(ch.get("space_for_later") or ch.get("留白") or "").strip()
     if sfl:
         lines.append(f"【为后文留白 / 埋钩】\n{sfl}")
+    tids_for_contract = (
+        theme_ids if theme_ids else [str(theme_id or "general").strip().lower()]
+    )
     ls = (length_scale or "").strip().lower()
     if ls == "short":
         short_struct = (
@@ -859,7 +904,7 @@ def _format_chapter_contract(
             "全章与邻章衔接的因果/时序/空间/现实**物理与常识**须清晰可推（题材特许者须在规则内自洽）。"
         )
         if idx in (1, 2):
-            if theme_id_is_suspense_horror(theme_id):
+            if any(theme_id_is_suspense_horror(t) for t in tids_for_contract):
                 short_struct += (
                     f"**本章为第 {idx} 章（短篇悬疑）**：须落实【短篇·悬疑/惊悚专规】——开篇极短篇幅内**悬疑感拉满**，勿寡淡起笔。"
                 )
@@ -868,12 +913,12 @@ def _format_chapter_contract(
                     f"**本章为第 {idx} 章**：须落实节奏（5）——开篇极短篇幅内给到明确的爽感或虐感，瞬间吸引读者，勿寡淡起笔。"
                 )
         lines.append(short_struct)
-        if theme_id_is_romance(theme_id):
+        if any(theme_id_is_romance(t) for t in tids_for_contract):
             lines.append(
                 "【结构提示·短篇言情】全书按网文体短篇言情执行：段落宜短、章末有钩子或情绪落点；"
                 "若梗概已写明虐/甜/爽主调须贯穿，勿改调；详见用户提示中的【短篇·网文体·言情专规】。"
             )
-        if theme_id_is_suspense_horror(theme_id):
+        if any(theme_id_is_suspense_horror(t) for t in tids_for_contract):
             lines.append(
                 "【结构提示·短篇悬疑】须落实用户提示中的【短篇·悬疑/惊悚专规】：**第1、2章**开篇须把悬疑感拉满，"
                 "以具体反常或信息差落地；后续章递进谜团或威胁，线索对读者公平。"
@@ -1132,6 +1177,7 @@ def _plan_from_title_single(
     temperature: float,
     ideation_level: float = 0.5,
     theme_id: Optional[str] = None,
+    theme_ids: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     n = max(3, min(int(chapter_count), PLAN_SINGLE_SHOT_MAX))
     compact = n > 10
@@ -1169,7 +1215,7 @@ def _plan_from_title_single(
         )
     user_p = f"题目：{title.strip()}\n"
     user_p += f"总章数（必须严格遵守）：恰好 {n} 章。\n"
-    user_p += _scale_instruction(length_scale, theme_id) + "\n"
+    user_p += _scale_instruction(length_scale, theme_id, theme_ids=theme_ids) + "\n"
     user_p += _protagonist_instruction(protagonist_gender) + "\n"
     user_p += ideation_instruction(ideation_level) + "\n"
     if theme_hint:
@@ -1215,6 +1261,7 @@ def _plan_book_meta(
     temperature: float,
     ideation_level: float = 0.5,
     theme_id: Optional[str] = None,
+    theme_ids: Optional[list[str]] = None,
 ) -> tuple[str, str]:
     sys_p = (
         "你是中文小说总策划。只输出一个 JSON 对象，禁止 Markdown。"
@@ -1225,7 +1272,7 @@ def _plan_book_meta(
     user_p = (
         f"题目：{title.strip()}\n"
         f"全书共 {total_chapters} 章（分章要点将分批生成，此处只输出书名定稿与全书梗概）。\n"
-        f"{_scale_instruction(length_scale, theme_id)}\n"
+        f"{_scale_instruction(length_scale, theme_id, theme_ids=theme_ids)}\n"
         f"{_protagonist_instruction(protagonist_gender)}\n"
         f"{ideation_instruction(ideation_level)}\n"
     )
@@ -1266,6 +1313,7 @@ def _plan_chapters_slice(
     macro_block: str = "",
     ideation_level: float = 0.5,
     theme_id: Optional[str] = None,
+    theme_ids: Optional[list[str]] = None,
 ) -> list[dict[str, Any]]:
     k = end_idx - start_idx + 1
     sys_p = (
@@ -1277,7 +1325,7 @@ def _plan_chapters_slice(
     )
     user_p = (
         f"原始题目：{title.strip()}\n书名：{book_title}\n【全书梗概】\n{premise}\n"
-        f"{_scale_instruction(length_scale, theme_id)}\n{_protagonist_instruction(protagonist_gender)}\n"
+        f"{_scale_instruction(length_scale, theme_id, theme_ids=theme_ids)}\n{_protagonist_instruction(protagonist_gender)}\n"
         f"{ideation_instruction(ideation_level)}\n"
     )
     if theme_hint:
@@ -1335,6 +1383,7 @@ def _plan_from_title_batched(
     temperature: float,
     ideation_level: float = 0.5,
     theme_id: Optional[str] = None,
+    theme_ids: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     n = max(3, min(int(chapter_count), MAX_PIPELINE_CHAPTERS))
     book_title, premise = _plan_book_meta(
@@ -1346,6 +1395,7 @@ def _plan_from_title_batched(
         temperature=temperature,
         ideation_level=ideation_level,
         theme_id=theme_id,
+        theme_ids=theme_ids,
     )
     all_ch = _batched_chapter_plan_slices(
         title=title,
@@ -1359,6 +1409,7 @@ def _plan_from_title_batched(
         macro_block="",
         ideation_level=ideation_level,
         theme_id=theme_id,
+        theme_ids=theme_ids,
     )
     return {"book_title": book_title, "premise": premise, "chapters": all_ch}
 
@@ -1375,6 +1426,7 @@ def _plan_from_title(
     progress_cb: ProgressCb = None,
     ideation_level: float = 0.5,
     theme_id: Optional[str] = None,
+    theme_ids: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     n_run = max(3, min(int(chapter_count), MAX_PIPELINE_CHAPTERS))
     if planned_total_chapters is not None:
@@ -1403,6 +1455,7 @@ def _plan_from_title(
             temperature=temperature,
             ideation_level=ideation_level,
             theme_id=theme_id,
+            theme_ids=theme_ids,
         )
         mb = _format_macro_block(macro, chapters_this_run=n_run)
         if progress_cb:
@@ -1425,6 +1478,7 @@ def _plan_from_title(
             macro_block=mb,
             ideation_level=ideation_level,
             theme_id=theme_id,
+            theme_ids=theme_ids,
         )
         return {
             "book_title": book_title,
@@ -1443,6 +1497,7 @@ def _plan_from_title(
             temperature=temperature,
             ideation_level=ideation_level,
             theme_id=theme_id,
+            theme_ids=theme_ids,
         )
     return _plan_from_title_batched(
         title=title,
@@ -1453,6 +1508,7 @@ def _plan_from_title(
         temperature=temperature,
         ideation_level=ideation_level,
         theme_id=theme_id,
+        theme_ids=theme_ids,
     )
 
 
@@ -1649,6 +1705,7 @@ def _seed_series_canon_memory(
     ideation_level: float = 0.5,
     extra_voice_context: str = "",
     theme_id: Optional[str] = None,
+    theme_ids: Optional[list[str]] = None,
 ) -> None:
     """开笔前：世界观/人物/伏笔/时间线写入本书记忆宫殿与条目（与长期记忆约定一致）。"""
     compact = _compact_outline_for_canon(chapters, n_target)
@@ -1675,7 +1732,7 @@ def _seed_series_canon_memory(
             pass
     user_p = (
         f"书名：{book_title}\n{plan_note}\n【全书梗概】\n{premise}\n"
-        f"{_scale_instruction(length_scale, theme_id)}\n{_protagonist_instruction(protagonist_gender)}\n"
+        f"{_scale_instruction(length_scale, theme_id, theme_ids=theme_ids)}\n{_protagonist_instruction(protagonist_gender)}\n"
         f"{ideation_instruction(ideation_level)}\n"
     )
     if theme_hint:
@@ -1818,6 +1875,7 @@ def run_pipeline_from_title(
     memory_episodic_keep_last: Optional[int] = None,
     foreshadowing_sync_after_chapter: bool = False,
     theme_id: Optional[str] = None,
+    theme_ids_selected: Optional[list[str]] = None,
     distilled_author_card: Optional[str] = None,
 ) -> dict[str, Any]:
     """策划 → 逐章写作 → 写入 books/{book_id}/。
@@ -1826,8 +1884,13 @@ def run_pipeline_from_title(
         use_scene_generation: If True, use scene-level generation for better
             long-text quality. Each chapter is split into scenes before writing.
         distilled_author_card: 若提供，使用蒸馏作者卡片替代随机生成虚拟作者。
+        theme_ids_selected: 已规范化的多题材 id；为空则等价于仅用 theme_id。
     """
-    theme_tid = str(theme_id or "general").strip().lower()
+    if theme_ids_selected and len(theme_ids_selected) > 0:
+        effective_theme_ids = list(theme_ids_selected)
+    else:
+        effective_theme_ids = [str(theme_id or "general").strip().lower()]
+    theme_tid = effective_theme_ids[0]
     theme_hint = (theme_addon or "").strip()
     note_s = (user_book_note or "").strip()
     theme_for_plan = theme_hint
@@ -1837,6 +1900,10 @@ def run_pipeline_from_title(
     length_scale = length_scale if length_scale in ("short", "medium", "long") else "medium"
     protagonist_gender = protagonist_gender if protagonist_gender in ("male", "female", "any") else "any"
     ideation_w = max(0.0, min(1.0, float(ideation_level)))
+    if distilled_author_card and str(distilled_author_card).strip():
+        distilled_author_card = prose_ascii_double_quotes_to_single(str(distilled_author_card).strip())
+    else:
+        distilled_author_card = None
     t0 = time.perf_counter()
     if progress_cb:
         progress_cb({"event": "phase", "phase": "planning", "message": "正在策划全书结构…"})
@@ -1859,6 +1926,7 @@ def run_pipeline_from_title(
             progress_cb=progress_cb,
             ideation_level=ideation_w,
             theme_id=theme_tid,
+            theme_ids=effective_theme_ids,
         )
     except (json.JSONDecodeError, ValueError, TypeError) as e:
         raise HTTPException(status_code=502, detail=f"策划阶段失败（JSON）：{e}") from e
@@ -1940,6 +2008,7 @@ def run_pipeline_from_title(
         "ideation_level": ideation_w,
         "virtual_author": author_meta,
         "theme_id": theme_tid,
+        "theme_ids": effective_theme_ids,
     }
     if note_s:
         meta_plan["user_book_note"] = note_s
@@ -1993,11 +2062,12 @@ def run_pipeline_from_title(
             ideation_level=ideation_w,
             extra_voice_context=canon_voice,
             theme_id=theme_tid,
+            theme_ids=effective_theme_ids,
         )
         _seed_author_project_memory_entries(
             book_path,
             user_book_note=note_s,
-            author_card=str(author_roll.get("card") or ""),
+            author_card=str(author_meta.get("card") or ""),
         )
 
     plan_ms = int((time.perf_counter() - t0) * 1000)
@@ -2046,7 +2116,12 @@ def run_pipeline_from_title(
             )
         ch_start = time.perf_counter()
         contract = _format_chapter_contract(
-            idx, ch, continuation=False, length_scale=length_scale, theme_id=theme_tid
+            idx,
+            ch,
+            continuation=False,
+            length_scale=length_scale,
+            theme_id=effective_theme_ids[0],
+            theme_ids=effective_theme_ids,
         )
         sem_q = f"{premise[:900]}\n{contract}"
         mem_book = ""
@@ -2073,8 +2148,12 @@ def run_pipeline_from_title(
             mem_parts.append(_macro_phase_note_for_chapter(idx, macro_for_writing))
         if length_scale == "short":
             mem_parts.append(_short_story_reader_engagement_instruction())
-            _maybe_append_short_story_romance_writer(mem_parts, length_scale=length_scale, theme_id=theme_tid)
-            _maybe_append_short_story_suspense_writer(mem_parts, length_scale=length_scale, theme_id=theme_tid)
+            _maybe_append_short_story_romance_writer(
+                mem_parts, length_scale=length_scale, theme_ids=effective_theme_ids
+            )
+            _maybe_append_short_story_suspense_writer(
+                mem_parts, length_scale=length_scale, theme_ids=effective_theme_ids
+            )
         if length_scale == "long":
             cl = read_changelog_tail(book_path, max_chars=1200)
             if cl.strip():
@@ -2253,6 +2332,7 @@ def run_pipeline_from_title(
             chapter_plain=cleaned,
             sync_book_memory=bool(sync_book_memory),
             progress_cb=progress_cb,
+            chapter_was_rewrite=False,
         )
 
     supervisor_final: dict[str, Any] | None = None
@@ -2278,6 +2358,7 @@ def run_pipeline_from_title(
             "virtual_author": author_meta,
             "user_book_note": note_s,
             "theme_id": theme_tid,
+            "theme_ids": effective_theme_ids,
         },
         "virtual_author": author_meta,
         "user_book_note": note_s,
@@ -2331,6 +2412,7 @@ def run_rewrite_chapter(
     memory_episodic_keep_last: Optional[int] = None,
     foreshadowing_sync_after_chapter: bool = False,
     theme_id: Optional[str] = None,
+    request_theme_ids: Optional[list[str]] = None,
     rewrite_author_note: Optional[str] = None,
     distilled_author_card: Optional[str] = None,
 ) -> dict[str, Any]:
@@ -2342,6 +2424,11 @@ def run_rewrite_chapter(
     idx = int(chapter_index) if chapter_index is not None else int(max(nums))
     if idx not in nums:
         raise HTTPException(status_code=404, detail=f"第 {idx} 章不存在")
+
+    if distilled_author_card and str(distilled_author_card).strip():
+        distilled_author_card = prose_ascii_double_quotes_to_single(str(distilled_author_card).strip())
+    else:
+        distilled_author_card = None
 
     plan_data = get_plan(root, book_id)
     premise = str(plan_data.get("premise") or "")
@@ -2367,7 +2454,12 @@ def run_rewrite_chapter(
     if iw_raw is None:
         iw_raw = 0.5
     ideation_w = max(0.0, min(1.0, float(iw_raw)))
-    theme_resolved = _resolved_theme_id_for_book(plan_data, request_theme_id=theme_id)
+    theme_prompt_ids = _theme_ids_for_run(
+        plan_data,
+        request_theme_ids=request_theme_ids,
+        request_theme_id=theme_id,
+    )
+    theme_resolved = theme_prompt_ids[0]
 
     ch_row: Optional[dict[str, Any]] = None
     chs_pl = plan_data.get("chapters")
@@ -2400,6 +2492,7 @@ def run_rewrite_chapter(
         is_rewrite=(idx > 1),
         length_scale=length_scale,
         theme_id=theme_resolved,
+        theme_ids=theme_prompt_ids,
     )
 
     system = writer_system.strip()
@@ -2455,10 +2548,10 @@ def run_rewrite_chapter(
     if length_scale == "short":
         mem_parts.append(_short_story_reader_engagement_instruction())
         _maybe_append_short_story_romance_writer(
-            mem_parts, length_scale=length_scale, theme_id=theme_resolved
+            mem_parts, length_scale=length_scale, theme_ids=theme_prompt_ids
         )
         _maybe_append_short_story_suspense_writer(
-            mem_parts, length_scale=length_scale, theme_id=theme_resolved
+            mem_parts, length_scale=length_scale, theme_ids=theme_prompt_ids
         )
     if length_scale == "long":
         cl = read_changelog_tail(book_path, max_chars=1200)
@@ -2695,6 +2788,7 @@ def run_rewrite_chapter(
         chapter_plain=cleaned,
         sync_book_memory=True,
         progress_cb=progress_cb,
+        chapter_was_rewrite=True,
     )
 
     if progress_cb:
@@ -2748,9 +2842,14 @@ def run_continue_next_chapter(
     memory_episodic_keep_last: Optional[int] = None,
     foreshadowing_sync_after_chapter: bool = False,
     theme_id: Optional[str] = None,
+    request_theme_ids: Optional[list[str]] = None,
     distilled_author_card: Optional[str] = None,
 ) -> dict[str, Any]:
     book_path = book_dir(root, book_id)
+    if distilled_author_card and str(distilled_author_card).strip():
+        distilled_author_card = prose_ascii_double_quotes_to_single(str(distilled_author_card).strip())
+    else:
+        distilled_author_card = None
     voice_block = ""
     if distilled_author_card and distilled_author_card.strip():
         voice_block = build_voice_prompt_blocks(user_book_note=None, author={"card": distilled_author_card.strip()})
@@ -2793,7 +2892,12 @@ def run_continue_next_chapter(
     ideation_w = max(0.0, min(1.0, float(iw_raw)))
     premise = str(plan_data.get("premise") or "")
     book_title = str(plan_data.get("book_title") or plan_data.get("title") or book_id)
-    theme_resolved = _resolved_theme_id_for_book(plan_data, request_theme_id=theme_id)
+    theme_prompt_ids = _theme_ids_for_run(
+        plan_data,
+        request_theme_ids=request_theme_ids,
+        request_theme_id=theme_id,
+    )
+    theme_resolved = theme_prompt_ids[0]
     length_scale_cont = "medium"
     meta_ls = plan_data.get("meta")
     if isinstance(meta_ls, dict):
@@ -2867,6 +2971,7 @@ def run_continue_next_chapter(
         continuation=True,
         length_scale=length_scale_cont,
         theme_id=theme_resolved,
+        theme_ids=theme_prompt_ids,
     )
 
     system = writer_system.strip()
@@ -2897,10 +3002,10 @@ def run_continue_next_chapter(
     if length_scale_cont == "short":
         parts.append(_short_story_reader_engagement_instruction())
         _maybe_append_short_story_romance_writer(
-            parts, length_scale=length_scale_cont, theme_id=theme_resolved
+            parts, length_scale=length_scale_cont, theme_ids=theme_prompt_ids
         )
         _maybe_append_short_story_suspense_writer(
-            parts, length_scale=length_scale_cont, theme_id=theme_resolved
+            parts, length_scale=length_scale_cont, theme_ids=theme_prompt_ids
         )
     if length_scale_cont == "long":
         clc = read_changelog_tail(book_path, max_chars=1200)
@@ -3105,6 +3210,7 @@ def run_continue_next_chapter(
         chapter_plain=cleaned,
         sync_book_memory=bool(sync_book_memory),
         progress_cb=progress_cb,
+        chapter_was_rewrite=False,
     )
 
     out: dict[str, Any] = {
@@ -3149,6 +3255,7 @@ def run_continue_chapters(
     memory_episodic_keep_last: Optional[int] = 48,
     foreshadowing_sync_after_chapter: bool = True,
     theme_id: Optional[str] = None,
+    request_theme_ids: Optional[list[str]] = None,
     distilled_author_card: Optional[str] = None,
 ) -> dict[str, Any]:
     """续写多章：逐章调用 run_continue_next_chapter。"""
@@ -3220,6 +3327,7 @@ def run_continue_chapters(
             memory_episodic_keep_last=memory_episodic_keep_last,
             foreshadowing_sync_after_chapter=foreshadowing_sync_after_chapter,
             theme_id=theme_id,
+            request_theme_ids=request_theme_ids,
             distilled_author_card=distilled_author_card if i == 0 else None,
         )
         ls = last.get("live_supervisor")
@@ -3270,6 +3378,7 @@ def run_continue_next_chapter_legacy_out(
     run_reader_test: bool = False,
     run_reader_driven_revision: bool = True,
     theme_id: Optional[str] = None,
+    request_theme_ids: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """兼容旧版 out/ 前缀_第NN章.md；编排模式与书本续写一致（fast / full）。"""
     out_dir = root / "out"
@@ -3326,6 +3435,12 @@ def run_continue_next_chapter_legacy_out(
         if lsg in ("short", "medium", "long"):
             length_scale_legacy = lsg
 
+    theme_legacy_ids = _theme_ids_for_run(
+        plan_data,
+        request_theme_ids=request_theme_ids,
+        request_theme_id=theme_id,
+    )
+
     last_text = last_path.read_text(encoding="utf-8")
     if last_text.strip().startswith("<!--"):
         close = last_text.find("-->")
@@ -3369,12 +3484,12 @@ def run_continue_next_chapter_legacy_out(
         _maybe_append_short_story_romance_writer(
             parts,
             length_scale=length_scale_legacy,
-            theme_id=str(theme_id or "general").strip().lower(),
+            theme_ids=theme_legacy_ids,
         )
         _maybe_append_short_story_suspense_writer(
             parts,
             length_scale=length_scale_legacy,
-            theme_id=str(theme_id or "general").strip().lower(),
+            theme_ids=theme_legacy_ids,
         )
     prev_for_ctx = last_text.strip()
     if len(prev_for_ctx) > 14000:
