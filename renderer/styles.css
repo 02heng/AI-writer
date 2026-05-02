@@ -555,7 +555,10 @@ body {
   top: 0;
   display: grid;
   grid-template-columns: 8.5rem minmax(0, 1fr);
-  max-height: min(22rem, calc(100vh - 1rem));
+  /* 必须有确定高度，子项才能让 .theme-cascade-grid 出现 overflow-y 滚动；
+     仅用 max-height 时面板会被内容无限撑高，滚动条永远不出现（内容在面板外层被裁切） */
+  grid-template-rows: minmax(0, 1fr);
+  height: min(22rem, calc(100vh - 1rem));
   box-sizing: border-box;
   border-radius: var(--radius-md, 12px);
   border: 1px solid var(--border-strong);
@@ -573,6 +576,8 @@ body {
   padding: 0.5rem 0;
   border-right: 1px solid var(--border);
   background: color-mix(in srgb, var(--surface-2) 92%, transparent);
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .theme-cat-btn {
@@ -626,13 +631,14 @@ body {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  height: 100%;
   overflow: hidden;
 }
 
 .theme-cascade-grid {
   flex: 1 1 auto;
   min-height: 0;
-  overflow-y: auto;
+  overflow-y: scroll;
   overflow-x: hidden;
   padding: 0.75rem;
   padding-right: 0.5rem;
