@@ -1609,8 +1609,7 @@ async function refreshHealth() {
   try {
     const h = await fetchJson('/api/health');
     const ds = h.deepseek_configured ? '已配置 Key' : '未配置 Key';
-    const tw = h.teardown_framework === false ? ' · 拆书框架缺失' : '';
-    el.textContent = `后端正常 · ${ds}${tw}`;
+    el.textContent = `后端正常 · ${ds}`;
     el.className = 'status-pill is-ok';
     const pathsEl = document.getElementById('paths-display');
     if (pathsEl && h.books_root) {
