@@ -2860,7 +2860,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           (x) => x && typeof x.key === 'string' && typeof x.selector === 'string'
         );
       }
-      await window.aiWriter.saveSettings({
+      const r = await window.aiWriter.saveSettings({
         deepseekApiKey: document.getElementById('api-key').value.trim(),
         deepseekModel: document.getElementById('model-id').value.trim() || 'deepseek-v4-flash',
         booksRoot: document.getElementById('books-root-path')?.value?.trim() || '',
@@ -2868,6 +2868,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         snapshotPageUrl: document.getElementById('snapshot-page-url')?.value?.trim() || '',
         metricsDomSelectors
       });
+      if (r?.writeError) {
+        void showAppAlert(String(r.writeError), '无法写入设置文件');
+        return;
+      }
+      if (r?.restartOk === false && r?.restartError) {
+        void showAppAlert(
+          `密钥等已保存到本机，但内置后端未在时限内就绪。\n\n${String(r.restartError)}`,
+          '后端启动失败'
+        );
+      }
       await refreshHealth();
       await refreshThemes();
       await refreshReaderShell();

@@ -202,7 +202,17 @@ function registerAllIpcHandlers() {
 
   ipcMain.handle('aiwriter:save-settings', async (_e, data) => {
     const dir = path.dirname(settingsPath());
-    fs.mkdirSync(dir, { recursive: true });
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch (e) {
+      return {
+        ok: false,
+        settingsSaved: false,
+        restartOk: false,
+        restartError: null,
+        writeError: e.message || String(e)
+      };
+    }
     const prev = {};
     try {
       Object.assign(prev, JSON.parse(fs.readFileSync(settingsPath(), 'utf8')));
@@ -234,7 +244,19 @@ function registerAllIpcHandlers() {
             'https://fanqienovel.com/main/writer/data?bookId=7628439872088329241',
       metricsDomSelectors
     };
-    fs.writeFileSync(settingsPath(), JSON.stringify(merged, null, 2), 'utf8');
+    let writeError = null;
+    try {
+      fs.writeFileSync(settingsPath(), JSON.stringify(merged, null, 2), 'utf8');
+    } catch (e) {
+      writeError = e.message || String(e);
+      return {
+        ok: false,
+        settingsSaved: false,
+        restartOk: false,
+        restartError: null,
+        writeError
+      };
+    }
     if (merged.snapshotAgentEnabled) {
       try {
         notifySettingsMayHaveEnabledSnap();
@@ -243,8 +265,19 @@ function registerAllIpcHandlers() {
       }
     }
     stopBackend();
-    await startBackend({ userDataPath: app.getPath('userData'), projectRoot });
-    return { ok: true };
+    try {
+      await startBackend({ userDataPath: app.getPath('userData'), projectRoot });
+      return { ok: true, settingsSaved: true, restartOk: true, restartError: null };
+    } catch (e) {
+      const restartError = e.message || String(e);
+      console.error('[ipc] save-settings backend restart:', restartError);
+      return {
+        ok: true,
+        settingsSaved: true,
+        restartOk: false,
+        restartError
+      };
+    }
   });
 
   ipcMain.handle('aiwriter:pick-books-dir', async (event) => {
@@ -263,8 +296,14 @@ function registerAllIpcHandlers() {
 
   ipcMain.handle('aiwriter:restart-backend', async () => {
     stopBackend();
-    await startBackend({ userDataPath: app.getPath('userData'), projectRoot });
-    return { ok: true };
+    try {
+      await startBackend({ userDataPath: app.getPath('userData'), projectRoot });
+      return { ok: true, restartOk: true, restartError: null };
+    } catch (e) {
+      const restartError = e.message || String(e);
+      console.error('[ipc] restart-backend:', restartError);
+      return { ok: true, restartOk: false, restartError };
+    }
   });
 
   ipcMain.handle('aiwriter:open-snapshot-login', async () => {

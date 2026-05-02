@@ -30,8 +30,12 @@ function resolveBundledBackendExe() {
 const BACKEND_PORT = 18765;
 const HEALTH_PATH = '/api/health';
 const MIN_API_REVISION = 2;
-const HEALTH_RETRIES = 40;
-const HEALTH_DELAY_MS = 250;
+/** 开发 / Python：约 15s */
+const HEALTH_RETRIES_PYTHON = 60;
+/** 打包 exe：Chromadb/onnxruntime 首次冷启动 + 杀毒扫描常超 15s */
+const HEALTH_RETRIES_BUNDLED = 120;
+const HEALTH_DELAY_MS = 300;
+const STDERR_TAIL_BYTES = 2000;
 
 let backendProcess = null;
 
@@ -55,10 +59,11 @@ function readSettings(userDataPath) {
   }
 }
 
-function waitForBackendReady(fromBundledExe) {
+function waitForBackendReady(fromBundledExe, maxRetries, ctl = { cancelled: false }) {
   return new Promise((resolve, reject) => {
     let attempts = 0;
     const tryOnce = () => {
+      if (ctl.cancelled) return;
       attempts += 1;
       const req = http.request(
         {
@@ -85,6 +90,7 @@ function waitForBackendReady(fromBundledExe) {
                 resolve();
                 return;
               }
+              ctl.cancelled = true;
               reject(
                 new Error(
                   `端口 ${BACKEND_PORT} 上已有其它程序在响应 /api/health（api_revision=${data.api_revision}），` +
@@ -105,11 +111,12 @@ function waitForBackendReady(fromBundledExe) {
       req.end();
 
       function retry() {
-        if (attempts >= HEALTH_RETRIES) {
+        if (ctl.cancelled) return;
+        if (attempts >= maxRetries) {
           reject(
             new Error(
               fromBundledExe
-                ? '后端内置程序在超时时间内未就绪，请重开应用或检查安全软件是否拦截。'
+                ? '后端内置程序在超时时间内未就绪。\n• 若为首次运行，杀毒软件可能在扫描 exe，请等待片刻后再次点「保存并重启后端」。\n• 也可能是端口 18765 已被其它程序占用。\n• 请尝试将 AI Writer 目录加入杀毒「信任区」。'
                 : '后端在超时时间内未就绪，请确认已安装 Python 依赖：pip install -r backend/requirements.txt'
             )
           );
@@ -199,30 +206,70 @@ function startBackend({ userDataPath, projectRoot }) {
       return;
     }
 
+    const ctl = { cancelled: false };
+    const stderrChunks = [];
+    const stderrTailSummary = () => {
+      try {
+        const buf = Buffer.concat(stderrChunks);
+        const slice = buf.subarray(Math.max(0, buf.length - STDERR_TAIL_BYTES));
+        const t = slice.toString('utf8').trim();
+        return t.length ? `\n———— 后端最近输出 ————\n${t}` : '';
+      } catch {
+        return '';
+      }
+    };
+
     const logLine = (buf, label) => {
       const s = String(buf).trimEnd();
       if (s) console.log(`[backend ${label}]`, s);
     };
     backendProcess.stdout.on('data', (d) => logLine(d, 'out'));
-    backendProcess.stderr.on('data', (d) => logLine(d, 'err'));
-
-    backendProcess.on('error', (err) => {
-      console.error('[backend] spawn error:', err);
+    backendProcess.stderr.on('data', (d) => {
+      logLine(d, 'err');
+      stderrChunks.push(Buffer.from(d));
+      let total = 0;
+      for (let i = stderrChunks.length - 1; i >= 0; i--) total += stderrChunks[i].length;
+      while (total > STDERR_TAIL_BYTES * 4 && stderrChunks.length > 1) {
+        total -= stderrChunks.shift().length;
+      }
     });
 
-    backendProcess.on('exit', (code, signal) => {
+    let settled = false;
+    function resolveReady() {
+      if (settled) return;
+      settled = true;
+      ctl.cancelled = true;
+      console.log('[backend] ready on port', BACKEND_PORT);
+      resolve();
+    }
+    function rejectReady(err) {
+      if (settled) return;
+      settled = true;
+      ctl.cancelled = true;
+      const msg =
+        typeof err.message === 'string' ? `${err.message}${stderrTailSummary()}` : `${String(err)}${stderrTailSummary()}`;
+      stopBackend();
+      reject(new Error(msg));
+    }
+
+    backendProcess.once('error', (err) => {
+      console.error('[backend] spawn error:', err);
+      rejectReady(new Error(`无法启动后端：${err.code || ''} ${err.message || err}`.trim()));
+    });
+
+    backendProcess.once('exit', (code, signal) => {
       console.log('[backend] exit', code, signal || '');
+      if (!settled) {
+        rejectReady(new Error(signal ? `后端进程被终止（signal ${signal}）` : `后端进程已退出（code ${code ?? 'null'}）`));
+      }
       backendProcess = null;
     });
 
-    waitForBackendReady(Boolean(bundledExe))
-      .then(() => {
-        console.log('[backend] ready on port', BACKEND_PORT);
-        resolve();
-      })
+    const retries = bundledExe ? HEALTH_RETRIES_BUNDLED : HEALTH_RETRIES_PYTHON;
+    waitForBackendReady(Boolean(bundledExe), retries, ctl)
+      .then(() => resolveReady())
       .catch((err) => {
-        stopBackend();
-        reject(err);
+        rejectReady(err);
       });
   });
 }
