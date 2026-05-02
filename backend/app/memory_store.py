@@ -308,24 +308,28 @@ _MINIMAL_THEMES: list[dict[str, Any]] = [
         "label": "通用 / 不限定",
         "description": "不额外强调题材，由梗概与知识库主导。",
         "system_addon": "",
+        "category": "main",
     },
     {
         "id": "realism",
         "label": "现实主义",
         "description": "当代或近代真实感社会背景。",
         "system_addon": "题材为现实主义：注重生活细节与人物动机，避免超自然解释。",
+        "category": "backdrop",
     },
     {
         "id": "fantasy",
         "label": "魔幻 / 西幻",
         "description": "魔法、种族、王国与冒险。",
         "system_addon": "题材为魔幻/西幻：保持魔法与势力设定前后一致。",
+        "category": "main",
     },
     {
         "id": "scifi",
         "label": "科幻",
         "description": "近未来或太空文明。",
         "system_addon": "题材为科幻：技术设定自洽并服务主题。",
+        "category": "main",
     },
 ]
 

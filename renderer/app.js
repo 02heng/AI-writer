@@ -156,8 +156,9 @@ const FALLBACK_THEMES = [
   }
 ];
 
-/** 写作台侧边栏分组（可与 themes.json 单条可选 `category` 叠加，未标注则按 id 回落） */
+/** 写作台侧边栏：「全部」展示所有题材；一至五类为后台 themes.json 中 category 字段分组 */
 const THEME_SIDEBAR_ROWS = [
+  ['all', '全部'],
   ['main', '一类'],
   ['plot', '二类'],
   ['character', '三类'],
@@ -165,7 +166,10 @@ const THEME_SIDEBAR_ROWS = [
   ['backdrop', '五类']
 ];
 
-const THEME_SIDEBAR_KEYS = new Set(THEME_SIDEBAR_ROWS.map((r) => r[0]));
+/** themes.json 中单条可用的 category（不含 UI 专用的 all） */
+const THEME_SIDEBAR_FILTER_KEYS = new Set(
+  THEME_SIDEBAR_ROWS.filter(([k]) => k !== 'all').map(([k]) => k)
+);
 
 const THEME_ID_SIDEBAR = {
   realism: 'backdrop',
@@ -213,7 +217,7 @@ const THEME_ID_SIDEBAR = {
 
 function sidebarKeyForThemeRow(t) {
   const raw = typeof t.category === 'string' ? t.category.trim().toLowerCase() : '';
-  if (raw && THEME_SIDEBAR_KEYS.has(raw)) return raw;
+  if (raw && raw !== 'all' && THEME_SIDEBAR_FILTER_KEYS.has(raw)) return raw;
   const id = String(t.id || '');
   return THEME_ID_SIDEBAR[id] || 'main';
 }
@@ -1869,8 +1873,10 @@ function renderThemeCascadeGrid(resetHover = false) {
   const grid = document.getElementById('theme-cascade-grid');
   const box = document.getElementById('theme-tags');
   if (!grid || !box) return;
-  const items = themesCache
-    .filter((t) => sidebarKeyForThemeRow(t) === activeThemeSidebarKey)
+  const items = (activeThemeSidebarKey === 'all'
+    ? themesCache.slice()
+    : themesCache.filter((t) => sidebarKeyForThemeRow(t) === activeThemeSidebarKey)
+  )
     .slice()
     .sort((a, b) =>
       String(a.label || a.id || '').localeCompare(String(b.label || b.id || ''), 'zh')
@@ -2105,7 +2111,7 @@ async function refreshThemes() {
     inp.checked = tid === 'general';
     box.appendChild(inp);
   }
-  activeThemeSidebarKey = 'main';
+  activeThemeSidebarKey = 'all';
   setThemeCascadePanelOpen(false);
   syncThemeCascadeNavActive();
   syncThemeCascadeChips();
