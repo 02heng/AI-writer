@@ -80,7 +80,23 @@
             <details class="rail-card" open>
               <summary class="rail-title">知识库 · kb</summary>
               <p class="rail-hint">勾选参与生成的 Markdown</p>
-              <div id="kb-list" class="kb-stack"></div>
+              <div class="kb-list-shell">
+                <label class="lbl" for="kb-filter-search">搜索文件名</label>
+                <input
+                  type="search"
+                  id="kb-filter-search"
+                  class="inp kb-filter-inp"
+                  placeholder="筛选 .md …"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <div id="kb-list-scroll" class="kb-list-scroll" role="region" aria-label="知识库文件列表">
+                  <p id="kb-filter-empty" class="rail-hint kb-filter-empty" hidden>
+                    无匹配文件，请换一个关键词。
+                  </p>
+                  <div id="kb-list" class="kb-stack"></div>
+                </div>
+              </div>
               <button type="button" class="btn btn-ghost btn-block" id="btn-refresh-kb">刷新列表</button>
             </details>
           </aside>
@@ -618,7 +634,7 @@
         </div>
       </div>
 
-      <!-- 拆书（v2：拆开头 + 蒸馏作者 + 旧版长篇拆书） -->
+      <!-- 拆书：拆开头 + 蒸馏作者 -->
       <div id="panel-teardown" class="view-panel" role="tabpanel">
         <!-- 拆书子导航 -->
         <nav class="teardown-sub-tabs" role="tablist" aria-label="拆书模式">
@@ -627,9 +643,6 @@
           </button>
           <button type="button" class="teardown-sub-tab" data-sub="distill" id="subtab-distill" role="tab" aria-selected="false">
             蒸馏作者
-          </button>
-          <button type="button" class="teardown-sub-tab" data-sub="classic" id="subtab-classic" role="tab" aria-selected="false">
-            长篇拆书（经典）
           </button>
         </nav>
 
@@ -741,62 +754,6 @@
                   <button type="button" class="btn btn-primary btn-sm" id="btn-distill-merge" disabled>合并蒸馏（需选 ≥2 篇）</button>
                 </div>
               </div>
-            </section>
-          </div>
-        </div>
-
-        <!-- ========== 长篇拆书（经典） ========== -->
-        <div id="subpanel-classic" class="teardown-sub-panel" role="tabpanel">
-          <div class="teardown-grid">
-            <section class="surface teardown-pane">
-              <div class="surface-head">
-                <h2 class="surface-title">长篇拆书</h2>
-                <p class="surface-lead">
-                  框架来自开源
-                  <a
-                    href="https://github.com/worldwonderer/oh-story-claudecode"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >oh-story-claudecode</a>
-                  的 <span class="inline-code">story-long-analyze</span>（黄金三章、节奏、爽点、整书结构模板）。请仅粘贴<strong>你有权使用</strong>的正文节选；不参与盗版站全文抓取。
-                </p>
-              </div>
-              <label class="lbl" for="teardown-title">书名（可选）</label>
-              <input type="text" id="teardown-title" class="inp" placeholder="对标作品名" autocomplete="off" />
-              <label class="lbl" for="teardown-mode">拆书模式</label>
-              <select id="teardown-mode" class="inp inp-select" aria-label="拆书模式">
-                <option value="quick">快速：黄金三章 + 整体结构 + 拆文报告</option>
-                <option value="deep">深度：单次回复内尽量按深度模板结构化</option>
-              </select>
-              <label class="lbl" for="teardown-note">节选说明（可选）</label>
-              <input
-                type="text"
-                id="teardown-note"
-                class="inp"
-                placeholder="如：第1～3章 / 开篇 + 第一次大转折"
-                autocomplete="off"
-              />
-              <label class="lbl" for="teardown-excerpt">正文节选</label>
-              <textarea id="teardown-excerpt" class="inp teardown-ta" rows="14" placeholder="粘贴待分析正文（不少于约 80 字）…"></textarea>
-              <div class="teardown-actions">
-                <button type="button" class="btn btn-primary" id="btn-teardown-run">开始拆书</button>
-                <span id="teardown-run-status" class="rail-hint" role="status"></span>
-              </div>
-            </section>
-            <section class="surface teardown-pane">
-              <div class="surface-head">
-                <h2 class="surface-title">拆书报告</h2>
-                <p class="surface-lead">生成后可保存到左侧知识库目录 <span class="inline-code">UserData/kb/*.md</span>，写作台勾选即可参与生成。</p>
-              </div>
-              <div id="teardown-output" class="teardown-output" aria-live="polite">
-                <p class="rail-hint">尚无输出</p>
-              </div>
-              <label class="lbl" for="teardown-kb-filename">保存为 kb 文件名</label>
-              <div class="teardown-save-row">
-                <input type="text" id="teardown-kb-filename" class="inp" placeholder="例如：拆书-对标作品.md" autocomplete="off" />
-                <button type="button" class="btn btn-secondary" id="btn-teardown-save-kb" disabled>保存到知识库</button>
-              </div>
-              <p id="teardown-save-status" class="rail-hint" role="status"></p>
             </section>
           </div>
         </div>

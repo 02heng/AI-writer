@@ -254,6 +254,9 @@ let booksListMeta = { total: 0 };
 let trashLoaded = [];
 let trashListMeta = { total: 0 };
 
+/** KB 文件名列表（与搜索筛选同步；条目始终在 DOM 中以保持勾选状态） */
+let kbFilesCache = [];
+
 const THEME_KEY = 'aiw-ui-theme';
 
 function initUiTheme() {
@@ -1533,78 +1536,6 @@ function initTeardownPanel() {
       distillMergeBtn.disabled = distillSelectedRecords.size < 2;
     }
   });
-
-  // ==================== 经典长篇拆书 ====================
-  let lastReportText = '';
-  const runBtn = document.getElementById('btn-teardown-run');
-  const saveBtn = document.getElementById('btn-teardown-save-kb');
-  const outEl = document.getElementById('teardown-output');
-  const runStatus = document.getElementById('teardown-run-status');
-  const saveStatus = document.getElementById('teardown-save-status');
-
-  runBtn?.addEventListener('click', async () => {
-    const excerpt = document.getElementById('teardown-excerpt')?.value?.trim() ?? '';
-    if (excerpt.length < 80) {
-      void showAppAlert('正文节选过短：请至少粘贴约 80 字再拆书。', '拆书');
-      return;
-    }
-    const book_title = document.getElementById('teardown-title')?.value?.trim() ?? '';
-    const mode = document.getElementById('teardown-mode')?.value ?? 'quick';
-    const excerpt_note = document.getElementById('teardown-note')?.value?.trim() ?? '';
-    if (runStatus) runStatus.textContent = '调用模型中…';
-    runBtn.disabled = true;
-    saveBtn && (saveBtn.disabled = true);
-    lastReportText = '';
-    try {
-      const r = await fetchJson('/api/teardown/novel', {
-        method: 'POST',
-        body: JSON.stringify({
-          excerpt,
-          book_title,
-          mode,
-          excerpt_note,
-          temperature: 0.35
-        })
-      });
-      lastReportText = typeof r?.text === 'string' ? r.text : '';
-      setOutputMarkdownText(outEl, lastReportText);
-      if (saveBtn) saveBtn.disabled = !lastReportText;
-      if (runStatus) runStatus.textContent = lastReportText ? '完成' : '无正文返回';
-    } catch (e) {
-      setOutputMarkdownText(outEl, '');
-      if (runStatus) runStatus.textContent = '';
-      void showAppAlert(e?.message || String(e), '拆书失败');
-    } finally {
-      runBtn.disabled = false;
-    }
-  });
-
-  saveBtn?.addEventListener('click', async () => {
-    if (!lastReportText) {
-      void showAppAlert('请先生成拆书报告。', '保存');
-      return;
-    }
-    let name = document.getElementById('teardown-kb-filename')?.value?.trim() ?? '';
-    if (!name) {
-      const t = document.getElementById('teardown-title')?.value?.trim() || '拆书';
-      name = `拆书-${t.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 60)}`;
-    }
-    if (saveStatus) saveStatus.textContent = '写入中…';
-    saveBtn.disabled = true;
-    try {
-      await fetchJson('/api/kb/write', {
-        method: 'POST',
-        body: JSON.stringify({ filename: name, content: lastReportText })
-      });
-      if (saveStatus) saveStatus.textContent = '已写入知识库，可在写作台刷新 kb 列表并勾选。';
-      await refreshKbList();
-    } catch (e) {
-      if (saveStatus) saveStatus.textContent = '';
-      void showAppAlert(e?.message || String(e), '保存失败');
-    } finally {
-      saveBtn.disabled = !lastReportText;
-    }
-  });
 }
 
 async function refreshSeriesList() {
@@ -1698,18 +1629,42 @@ async function refreshHealth() {
   }
 }
 
+function applyKbListFilter() {
+  const emptyEl = document.getElementById('kb-filter-empty');
+  const listRoot = document.getElementById('kb-list');
+  if (!listRoot) return;
+  const q = document.getElementById('kb-filter-search')?.value?.trim().toLowerCase() ?? '';
+  const items = listRoot.querySelectorAll('.kb-item');
+  let visible = 0;
+  items.forEach((row) => {
+    const name = row.dataset.kbName || '';
+    const match = !q || name.toLowerCase().includes(q);
+    row.classList.toggle('kb-item-hidden', !match);
+    if (match) visible += 1;
+  });
+  if (emptyEl) {
+    emptyEl.hidden = !(kbFilesCache.length > 0 && visible === 0);
+  }
+}
+
 async function refreshKbList() {
   const box = document.getElementById('kb-list');
+  if (!box) return;
+  kbFilesCache = [];
   box.innerHTML = '';
+  const emptyEl = document.getElementById('kb-filter-empty');
+  if (emptyEl) emptyEl.hidden = true;
   try {
     const { files } = await fetchJson('/api/kb');
-    if (!files.length) {
+    kbFilesCache = Array.isArray(files) ? [...files] : [];
+    if (!kbFilesCache.length) {
       box.innerHTML = '<p class="rail-hint">暂无 .md，首次运行后会在 UserData/kb 生成示例文件。</p>';
       return;
     }
-    for (const f of files) {
+    for (const f of kbFilesCache) {
       const row = document.createElement('label');
       row.className = 'kb-item';
+      row.dataset.kbName = f;
       const cb = document.createElement('input');
       cb.type = 'checkbox';
       cb.className = 'kb-cb';
@@ -1719,7 +1674,9 @@ async function refreshKbList() {
       row.appendChild(document.createTextNode(f));
       box.appendChild(row);
     }
+    applyKbListFilter();
   } catch {
+    kbFilesCache = [];
     box.innerHTML = '<p class="rail-hint">无法加载列表</p>';
   }
 }
@@ -2860,6 +2817,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('btn-refresh-kb').addEventListener('click', () => {
     refreshKbList();
+  });
+
+  document.getElementById('kb-filter-search')?.addEventListener('input', () => {
+    applyKbListFilter();
   });
 
   document.getElementById('btn-save-settings').addEventListener('click', async () => {
