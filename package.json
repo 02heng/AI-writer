@@ -30,7 +30,8 @@
     ],
     "asarUnpack": ["electron/**/*"],
     "win": {
-      "target": ["nsis"]
+      "target": ["nsis"],
+      "signAndEditExecutable": false
     },
     "mac": {
       "target": ["dmg", "zip"],

@@ -18,18 +18,34 @@ if (!fs.existsSync(spec)) {
 }
 
 const win = process.platform === 'win32';
-const py = process.env.AIWRITER_PYTHON || (win ? 'py' : 'python3');
-const prefix = win ? ['-3'] : [];
-const args = [...prefix, '-m', 'PyInstaller', '--noconfirm', '--clean', 'aiwriter-backend.spec'];
+/** AIWRITER_PYTHON 或 PATH 上的解释器；【py -3】在部分环境里会错误地把 -3 传给 python.exe */
+const candidates = [];
+if (process.env.AIWRITER_PYTHON) {
+  candidates.push([process.env.AIWRITER_PYTHON, []]);
+}
+if (win) {
+  candidates.push(['python', []], ['py', ['-3']]);
+} else {
+  candidates.push(['python3', []], ['python', []]);
+}
 
-const r = spawnSync(py, args, {
-  cwd: backendDir,
-  stdio: 'inherit',
-  env: { ...process.env, PYTHONUTF8: '1' }
-});
+let r = { error: new Error('no candidate'), status: -1 };
+let lastCmd = '';
+for (const [cmd, prefix] of candidates) {
+  lastCmd = [cmd, ...prefix].filter(Boolean).join(' ');
+  r = spawnSync(cmd, [...prefix, '-m', 'PyInstaller', '--noconfirm', '--clean', 'aiwriter-backend.spec'], {
+    cwd: backendDir,
+    stdio: 'inherit',
+    env: { ...process.env, PYTHONUTF8: '1' },
+    shell: false
+  });
+  if (r.error) continue;
+  break;
+}
 
-if (r.error) {
-  console.error('[build-backend]', r.error.message || r.error);
+if (!r || r.error) {
+  console.error('[build-backend] Cannot run interpreter. Last tried:', lastCmd || String(candidates));
+  if (r && r.error) console.error('[build-backend]', r.error.message || r.error);
   process.exit(1);
 }
 if (r.status !== 0) {
