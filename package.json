@@ -3,24 +3,28 @@
   "version": "1.0.1",
   "description": "AI novel writer — Electron shell, data on D:/E: drive",
   "author": "02heng",
+  "license": "MIT",
   "main": "electron/main.cjs",
   "scripts": {
     "start": "electron .",
     "backend": "npm run dev --prefix backend",
     "sync-themes": "node scripts/sync-themes.cjs",
     "build-backend": "node scripts/build-backend.cjs",
-    "prepack": "node scripts/sync-themes.cjs",
-    "predist": "node scripts/sync-themes.cjs",
+    "prepack": "node scripts/sync-themes.cjs && node scripts/make-windows-ico.mjs",
+    "predist": "node scripts/sync-themes.cjs && node scripts/make-windows-ico.mjs",
     "pack": "npm run build-backend && electron-builder --dir",
     "dist": "npm run build-backend && electron-builder --publish never"
   },
   "devDependencies": {
     "electron": "^35.0.0",
-    "electron-builder": "^26.0.0"
+    "electron-builder": "^26.0.0",
+    "png-to-ico": "^3.0.1",
+    "sharp": "^0.34.5"
   },
   "build": {
     "appId": "com.aiwriter.app",
     "productName": "AI Writer",
+    "icon": "build/icon.png",
     "directories": {
       "output": "release"
     },
@@ -34,7 +38,8 @@
     "asarUnpack": ["electron/**/*"],
     "win": {
       "target": ["nsis"],
-      "signAndEditExecutable": false
+      "signAndEditExecutable": false,
+      "icon": "build/icon.ico"
     },
     "mac": {
       "target": ["dmg", "zip"],
@@ -42,7 +47,10 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico"
     }
   }
 }

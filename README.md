@@ -122,3 +122,7 @@ AI-writer/
 ---
 
 如在 Issues 中反馈 bug 或需求，请尽量附上操作系统版本、复现步骤与相关日志（`UserData/Logs/` 等）。
+
+## 许可证
+
+本项目以 [MIT License](./LICENSE) 发布。内置第三方材料见仓库内各 `NOTICE` / 上游许可证副本。

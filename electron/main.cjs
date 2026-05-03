@@ -322,9 +322,11 @@ function registerAllIpcHandlers() {
 }
 
 function createWindow() {
+  const iconPath = path.join(projectRoot, 'build', 'icon.png');
   const win = new BrowserWindow({
     width: 1100,
     height: 820,
+    ...(fs.existsSync(iconPath) ? { icon: iconPath } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
