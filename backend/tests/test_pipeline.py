@@ -115,6 +115,14 @@ class TestPipelineHelpers:
         assert "，" in sanitize_chapter_body("沉默,-良久")
         assert ",-" not in sanitize_chapter_body("沉默,-良久")
 
+    def test_sanitize_chapter_body_replaces_em_dashes_with_cjk_commas(self) -> None:
+        from app.pipeline import sanitize_chapter_body
+
+        out = sanitize_chapter_body("他愣住——什么也没说。—走了。")
+        assert "——" not in out
+        assert "—" not in out
+        assert out == "他愣住，什么也没说。，走了。"
+
     def test_sanitize_chapter_body_strips_hash_marks(self) -> None:
         from app.pipeline import sanitize_chapter_body
 

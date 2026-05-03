@@ -43,6 +43,19 @@ def strip_comma_hyphen_glitch(text: str) -> str:
     return re.sub(r",\s*-\s*", "，", text)
 
 
+def prose_em_dashes_to_cjk_commas(text: str) -> str:
+    """将 Unicode 破折号/长划（— ― –）替换为中文逗号；连续多个合并为单个逗号。
+
+    不处理 ASCII U+002D「-」，避免外文名或数字区间被误伤。
+    """
+    if not text:
+        return text
+    t = re.sub(r"[—―–]{2,}", "，", text)
+    for dash in ("—", "―", "–"):
+        t = t.replace(dash, "，")
+    return re.sub(r"，{4,}", "，", t)
+
+
 def collapse_ascii_quote_linebreaks(text: str) -> str:
     """
     合并模型在 ASCII 双引号对话里多余的硬换行。
@@ -107,6 +120,7 @@ def strip_aiwriter_prose_noise(text: str) -> str:
     """Strip Markdown line junk and `,-` glitches after ** removal (used on chapter bodies)."""
     t = strip_markdown_line_prefixes(text)
     t = strip_comma_hyphen_glitch(t)
+    t = prose_em_dashes_to_cjk_commas(t)
     return collapse_ascii_quote_linebreaks(t)
 
 

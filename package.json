@@ -10,8 +10,9 @@
     "backend": "npm run dev --prefix backend",
     "sync-themes": "node scripts/sync-themes.cjs",
     "build-backend": "node scripts/build-backend.cjs",
-    "prepack": "node scripts/sync-themes.cjs && node scripts/make-windows-ico.mjs",
-    "predist": "node scripts/sync-themes.cjs && node scripts/make-windows-ico.mjs",
+    "render-icon": "node scripts/render-app-icon.mjs",
+    "prepack": "node scripts/sync-themes.cjs && node scripts/render-app-icon.mjs && node scripts/make-windows-ico.mjs",
+    "predist": "node scripts/sync-themes.cjs && node scripts/render-app-icon.mjs && node scripts/make-windows-ico.mjs",
     "pack": "npm run build-backend && electron-builder --dir",
     "dist": "npm run build-backend && electron-builder --publish never"
   },

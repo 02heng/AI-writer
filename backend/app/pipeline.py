@@ -548,7 +548,7 @@ def strip_leading_duplicate_chapter_heading(body: str, ch_title: str) -> str:
 
 
 def sanitize_chapter_body(body: str) -> str:
-    """Strip HTML comments, decorative lines, Markdown **bold**, line-leading > / list / # marks, `,-` glitches, and LLM hard wraps inside ASCII \" dialogue."""
+    """Strip HTML comments, decorative lines, Markdown **bold**, line-leading > / list / # marks, `,-` glitches、Unicode 破折号（— ― – → ，）与 LLM 在 ASCII 双引号对话里的硬换行。"""
     t = body.strip()
     t = re.sub(r"<!--[\s\S]*?-->", "", t)
     lines_out: list[str] = []

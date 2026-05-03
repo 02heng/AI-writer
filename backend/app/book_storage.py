@@ -274,7 +274,7 @@ def get_plan(data_root: Path, book_id: str) -> dict[str, Any]:
 
 
 def clean_stored_chapter_text(text: str) -> str:
-    """Remove HTML comment headers, Markdown **bold**, line-leading > / lists, `,-` glitches, and trim."""
+    """Remove HTML comment headers, Markdown **bold**, line-leading > / lists、`,-`、`— ― –`→`，、and trim."""
     t = text
     if t.strip().startswith("<!--"):
         close = t.find("-->")
